@@ -41,9 +41,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     settings = get_settings()
     logger.info(
-        "AE-03 starting | provider=%s | env=%s",
+        "AE-03 starting | provider=%s | log_level=%s",
         settings.default_provider,
-        "production" if not settings.debug else "debug",
+        settings.log_level,
     )
 
     # Eagerly init the provider router so first request is fast
