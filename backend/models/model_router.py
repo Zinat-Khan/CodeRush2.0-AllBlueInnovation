@@ -161,9 +161,10 @@ class ModelRouter:
     def __init__(
         self,
         settings: Optional[AppSettings] = None,
-        max_retries: int = 2,
-        timeout_seconds: int = 60,
+        max_retries: int = 0,
+        timeout_seconds: int = 15,
     ):
+
         self._settings = settings or get_settings()
         self._max_retries = max_retries
         self._timeout_seconds = timeout_seconds
@@ -177,14 +178,19 @@ class ModelRouter:
         """
         Eagerly initialise all configured providers.
 
-        Order: primary provider first, then remaining providers in
-        Google → OpenAI → Ollama order.
+        Order: Main APIs (Google -> OpenAI -> Groq) followed by
+        OpenRouter fallback APIs (Keys 1-7) -> Ollama local.
         """
         settings = self._settings
         primary = settings.primary_provider
 
-        # Build ordered list (primary first, then the rest)
-        all_providers = ["google", "openai", "ollama"]
+        # Main APIs + OpenRouter Fallbacks + Local
+        all_providers = [
+            "google", "openai", "groq",
+            "openrouter_1", "openrouter_2", "openrouter_3",
+            "openrouter_4", "openrouter_5", "openrouter_6", "openrouter_7",
+            "ollama",
+        ]
         ordered = [primary] + [p for p in all_providers if p != primary]
 
         for provider_name in ordered:
@@ -239,6 +245,56 @@ class ModelRouter:
             return ChatOpenAI(
                 model=settings.openai_model,
                 api_key=api_key,
+                temperature=0.0,
+                max_retries=self._max_retries,
+                timeout=self._timeout_seconds,
+            )
+
+        elif provider_name == "groq":
+            api_key = settings.groq_api_key
+            if not api_key:
+                logger.debug("Groq API key not set, skipping.")
+                return None
+            try:
+                from langchain_groq import ChatGroq
+
+                return ChatGroq(
+                    model_name=settings.groq_model,
+                    groq_api_key=api_key,
+                    temperature=0.0,
+                    max_retries=self._max_retries,
+                    timeout=self._timeout_seconds,
+                )
+            except Exception as e:
+                logger.warning("Failed to create Groq provider: %s", e)
+                return None
+
+        elif provider_name.startswith("openrouter_"):
+            key_num = provider_name.split("_")[1]
+            key_attr = f"openrouter_key_{key_num}"
+            api_key = getattr(settings, key_attr, "")
+            if not api_key:
+                logger.debug("OpenRouter key %s not set, skipping.", key_num)
+                return None
+
+            from langchain_openai import ChatOpenAI
+
+            # Map OpenRouter keys to respective models
+            model_map = {
+                "openrouter_1": "anthropic/claude-3-haiku",
+                "openrouter_2": "openai/gpt-4o-mini",
+                "openrouter_3": "openai/gpt-4o-mini",
+                "openrouter_4": "anthropic/claude-3-haiku",
+                "openrouter_5": "openai/gpt-4o-mini",
+                "openrouter_6": "openai/gpt-4o-mini",
+                "openrouter_7": "openai/gpt-4o-mini",
+            }
+            model_name = model_map.get(provider_name, "openai/gpt-4o-mini")
+
+            return ChatOpenAI(
+                model=model_name,
+                api_key=api_key,
+                openai_api_base="https://openrouter.ai/api/v1",
                 temperature=0.0,
                 max_retries=self._max_retries,
                 timeout=self._timeout_seconds,

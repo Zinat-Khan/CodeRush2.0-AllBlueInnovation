@@ -33,7 +33,7 @@ class OpenAIProvider(BaseLLMProvider):
     def __init__(self, api_key: Optional[str] = None, default_model: Optional[str] = None):
         settings = get_settings()
         self._api_key = api_key or settings.openai_api_key
-        self._default_model = default_model or settings.default_model_openai
+        self._default_model = default_model or getattr(settings, 'openai_model', 'gpt-4o')
         self._client = AsyncOpenAI(api_key=self._api_key)
 
     async def call_llm(

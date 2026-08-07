@@ -1,4 +1,4 @@
-"""AE-03: Engine sub-package — Async DAG Executor, State Management & Recovery."""
+"""AE-03: Engine sub-package — State Management & Recovery (V2)."""
 
 from backend.engine.state_manager import (
     AgentScratchMemory,
@@ -11,16 +11,13 @@ from backend.engine.recovery import (
     RetryPolicy,
     build_retry_context,
 )
-from backend.engine.executor import AsyncDAGExecutor, topological_layers
 
 __all__ = [
     "AgentScratchMemory",
-    "AsyncDAGExecutor",
     "CompensationRouter",
     "ExecutionState",
     "NodeExecutionError",
     "RetryPolicy",
     "SharedProjectMemory",
     "build_retry_context",
-    "topological_layers",
 ]
