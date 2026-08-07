@@ -1,0 +1,88 @@
+{
+  "name": "AE-03 Worker C - External API Calls",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agent-worker-api",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "agent-worker-api"
+    },
+    {
+      "parameters": {
+        "jsCode": "// AE-03 Worker C: External API Calls\n// Receives: { target_api, method, headers, parameters }\n// Returns: ApiWorkerResult (Pydantic-compliant)\n\nconst input = $input.first().json;\nconst targetApi = input.target_api || '';\nconst method = (input.method || 'GET').toUpperCase();\nconst headers = input.headers || {};\nconst parameters = input.parameters || {};\n\n// --- Simulated external API call ---\n// In production, replace this Code node with an actual\n// n8n HTTP Request node pointed at targetApi.\n\nlet statusCode = 200;\nlet responseBody = {};\nlet success = true;\n\nif (!targetApi) {\n  statusCode = 400;\n  responseBody = { error: 'No target_api specified' };\n  success = false;\n} else {\n  responseBody = {\n    message: `Successfully called ${method} ${targetApi}`,\n    request_parameters: parameters,\n    mock_data: {\n      timestamp: new Date().toISOString(),\n      source: 'ae03-worker-api'\n    }\n  };\n}\n\nreturn [{\n  json: {\n    status_code: statusCode,\n    response_body: responseBody,\n    success: success\n  }\n}];"
+      },
+      "id": "call-api",
+      "name": "Call External API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Call External API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call External API": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ae03-worker-api"
+  },
+  "tags": [
+    {
+      "name": "AE-03",
+      "id": "ae03"
+    }
+  ]
+}

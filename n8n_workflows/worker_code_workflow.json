@@ -1,0 +1,88 @@
+{
+  "name": "AE-03 Worker B - Code Generation & Execution",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agent-worker-code",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "agent-worker-code"
+    },
+    {
+      "parameters": {
+        "jsCode": "// AE-03 Worker B: Code Generation & Execution\n// Receives: { task_description, language, context }\n// Returns: CodeWorkerResult (Pydantic-compliant)\n\nconst input = $input.first().json;\nconst taskDesc = input.task_description || '';\nconst language = input.language || 'python';\nconst context = input.context || {};\n\n// --- Simulated code generation ---\nlet generatedCode = '';\nlet executionOutput = null;\n\nif (language === 'python') {\n  generatedCode = `# Auto-generated for task: ${taskDesc}\\n\\ndef execute_task():\\n    \"\"\"${taskDesc}\"\"\"\\n    result = {\"status\": \"completed\", \"task\": \"${taskDesc.substring(0, 50)}\"}\\n    return result\\n\\nif __name__ == \"__main__\":\\n    output = execute_task()\\n    print(output)`;\n  executionOutput = `{'status': 'completed', 'task': '${taskDesc.substring(0, 50)}'}`;\n} else if (language === 'typescript') {\n  generatedCode = `// Auto-generated for task: ${taskDesc}\\n\\nexport function executeTask(): Record<string, string> {\\n  return { status: \"completed\", task: \"${taskDesc.substring(0, 50)}\" };\\n}`;\n  executionOutput = null;\n} else {\n  generatedCode = `#!/bin/bash\\n# Auto-generated for task: ${taskDesc}\\necho \"Task completed: ${taskDesc.substring(0, 50)}\"`;\n  executionOutput = `Task completed: ${taskDesc.substring(0, 50)}`;\n}\n\nreturn [{\n  json: {\n    status: 'success',\n    generated_code: generatedCode,\n    execution_output: executionOutput,\n    success: true\n  }\n}];"
+      },
+      "id": "generate-code",
+      "name": "Generate Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Generate Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ae03-worker-code"
+  },
+  "tags": [
+    {
+      "name": "AE-03",
+      "id": "ae03"
+    }
+  ]
+}
