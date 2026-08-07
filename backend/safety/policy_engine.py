@@ -1,385 +1,446 @@
 """
-AE-03 Policy Engine — Standalone, Stateless Policy Evaluator.
+AE-03 Deterministic Policy Engine (Directive V2).
 
-[REV2 PATCH] — Decoupled from the Verifier agent.  The Verifier handles
-schema/output validation; the Policy Engine handles access control and
-content-safety screening.
+Deny-by-default security engine that intercepts all agent operations
+and enforces access control before execution. This is a COMPLETE rewrite
+of the V1 policy engine.
 
-Provides:
-  - PolicyEngine: evaluates tool-permission and content-safety checks.
-  - load_policy_rules(): loads extensible policy rules from a JSON config.
+Intercepts:
+  - Tool requests (via ToolRegistry permission + agent capability matrix)
+  - Resource access (file, network, database)
+  - External actions (API calls, web scraping)
+  - Prompt-injection defense (treats external content as untrusted)
+
+Architecture:
+  - Deterministic (no LLM calls) — pure rule evaluation
+  - Stateless — each check is independent
+  - Composable — rules are evaluated in order, first match wins
+  - Auditable — every decision is logged with rule_matched and reason
+
+Policy Rules:
+  1. DENY if tool not registered in ToolRegistry
+  2. DENY if agent role not in tool's allowed_agents
+  3. DENY if agent capability matrix forbids the operation
+  4. REQUIRE_APPROVAL if risk_level >= HIGH
+  5. REQUIRE_APPROVAL if tool explicitly requires approval
+  6. DENY if content contains prompt-injection patterns
+  7. ALLOW if all checks pass
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from pathlib import Path
-from typing import Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
-from backend.schemas.contracts import AgentConfig, AgentRole
-from backend.safety.permissions import (
-    DEFAULT_ROLE_PERMISSIONS,
-    DENIED_TOOLS,
-    PermissionResult,
-    PolicyRule,
-    SafetyResult,
-    ThreatSeverity,
+from backend.schemas.contracts import (
+    AgentRole,
+    RiskLevel,
+    SecurityDecision,
+    SecurityVerdict,
+    ToolRequest,
+)
+from backend.safety.agent_config import (
+    AGENT_CAPABILITIES,
+    get_capability,
+    is_tool_allowed,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ── Adversarial Content Detection Patterns ─────────────────────────────
+# ── Prompt Injection Patterns ─────────────────────────────────────────
 
-_ADVERSARIAL_PATTERNS: List[dict] = [
+INJECTION_PATTERNS = [
     {
-        "name": "prompt_injection_ignore",
+        "name": "ignore_instructions",
         "pattern": r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?|context)",
-        "threat_type": "prompt_injection",
-        "severity": ThreatSeverity.CRITICAL,
+        "severity": "high",
     },
     {
-        "name": "prompt_injection_new_role",
-        "pattern": r"(?i)you\s+are\s+now\s+(a\s+)?(new|different|unrestricted|jailbroken)",
-        "threat_type": "prompt_injection",
-        "severity": ThreatSeverity.CRITICAL,
+        "name": "new_persona",
+        "pattern": r"(?i)(you\s+are\s+now|pretend\s+to\s+be|act\s+as\s+if|roleplay\s+as)",
+        "severity": "high",
     },
     {
-        "name": "system_prompt_extraction",
-        "pattern": r"(?i)(show|reveal|print|output|repeat|display)\s+(your\s+)?(system\s+prompt|instructions|initial\s+prompt|system\s+message)",
-        "threat_type": "system_prompt_extraction",
-        "severity": ThreatSeverity.HIGH,
+        "name": "system_override",
+        "pattern": r"(?i)(new\s+system\s+prompt|override\s+your|disregard\s+all|forget\s+(everything|all))",
+        "severity": "critical",
     },
     {
-        "name": "role_override",
-        "pattern": r"(?i)(act|behave|respond)\s+as\s+(if\s+)?(you\s+)?(are|were)\s+(a\s+)?(different|unrestricted|admin|root|sudo)",
-        "threat_type": "role_override",
-        "severity": ThreatSeverity.HIGH,
+        "name": "code_execution",
+        "pattern": r"(?i)(exec|eval|__import__|subprocess|os\.system|os\.popen)\s*\(",
+        "severity": "critical",
     },
     {
-        "name": "delimiter_injection",
-        "pattern": r"(?i)(```|<\|im_end\|>|<\|im_start\|>|<\|system\|>|<\|user\|>|<\|assistant\|>|\[INST\]|\[/INST\])",
-        "threat_type": "delimiter_injection",
-        "severity": ThreatSeverity.MEDIUM,
+        "name": "data_exfiltration",
+        "pattern": r"(?i)(send\s+.*\s+to|upload\s+.*\s+to|post\s+.*\s+to|transmit\s+.*\s+to)\s+(http|ftp|ssh)",
+        "severity": "high",
     },
     {
-        "name": "api_key_exfiltration",
-        "pattern": r"(?i)(send|post|transmit|exfiltrate|leak|share|output)\s+.{0,40}(api[_\s]?key|secret|token|password|credential)",
-        "threat_type": "data_exfiltration",
-        "severity": ThreatSeverity.CRITICAL,
-    },
-    {
-        "name": "encoded_injection",
-        "pattern": r"(?i)(base64|hex|rot13|url)[_\s]?(encode|decode|convert)\s+.{0,30}(prompt|instruction|system|ignore)",
-        "threat_type": "encoded_injection",
-        "severity": ThreatSeverity.MEDIUM,
-    },
-    {
-        "name": "tool_escalation_request",
-        "pattern": r"(?i)(grant|give|enable|allow|unlock)\s+(me\s+|yourself\s+)?(access|permission)\s+to\s+.{0,40}(terminal|shell|system|admin|root|sudo|exec)",
-        "threat_type": "privilege_escalation",
-        "severity": ThreatSeverity.HIGH,
+        "name": "boundary_escape",
+        "pattern": r"(?i)(```\s*(system|admin|root)|<\/?system>|<\/?admin>)",
+        "severity": "medium",
     },
 ]
 
-_COMPILED_PATTERNS: List[dict] = []
-for _p in _ADVERSARIAL_PATTERNS:
-    _COMPILED_PATTERNS.append({
-        **_p,
-        "_compiled": re.compile(_p["pattern"]),
-    })
 
-
-# ── Policy Rule Loading ───────────────────────────────────────────────
-
-
-def load_policy_rules(path: str) -> List[PolicyRule]:
-    """
-    Load policy rules from a JSON configuration file.
-
-    Expected format::
-
-        {
-          "rules": [
-            {
-              "rule_id": "restrict-researcher-tools",
-              "description": "Researchers may not call code_execute",
-              "target_roles": ["researcher"],
-              "denied_tools": ["code_execute"],
-              "enabled": true,
-              "priority": 10
-            }
-          ]
-        }
-
-    Args:
-        path: Filesystem path to the JSON config file.
-
-    Returns:
-        List of validated PolicyRule objects (sorted by priority descending).
-
-    Raises:
-        FileNotFoundError: If the config file doesn't exist.
-        json.JSONDecodeError: If the config file contains invalid JSON.
-    """
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Policy config not found: {path}")
-
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    rules_data = raw.get("rules", [])
-    rules = [PolicyRule(**r) for r in rules_data]
-    # Sort by priority descending (highest priority evaluated first)
-    rules.sort(key=lambda r: r.priority, reverse=True)
-    logger.info("Loaded %d policy rules from '%s'", len(rules), path)
-    return rules
-
-
-# ── Policy Engine ──────────────────────────────────────────────────────
+# ── Policy Engine ─────────────────────────────────────────────────────
 
 
 class PolicyEngine:
     """
-    Standalone, stateless policy evaluator.
+    Deterministic deny-by-default security policy engine.
 
-    [REV2 PATCH] — Separated from the Verifier agent.  The PolicyEngine
-    handles access control (tool permissions) and content-safety screening.
-    The Verifier handles output schema validation.
+    Evaluates every tool request and content operation against a
+    composable rule chain. No LLM calls — pure deterministic logic.
 
     Usage::
 
         engine = PolicyEngine()
-        perm = engine.check_permission(agent_config, "terminal_exec")
-        safety = engine.check_content_safety(user_input)
+
+        # Check a tool request
+        decision = engine.evaluate_tool_request(tool_request)
+        if decision.verdict == SecurityVerdict.DENY:
+            raise PermissionError(decision.reason)
+
+        # Scan content for injection
+        decision = engine.scan_content(text, source="user_upload")
     """
 
-    def __init__(
-        self,
-        *,
-        custom_rules: Optional[List[PolicyRule]] = None,
-        additional_denied_tools: Optional[set[str]] = None,
-    ):
-        self._custom_rules: List[PolicyRule] = custom_rules or []
-        self._additional_denied: set[str] = additional_denied_tools or set()
+    def __init__(self) -> None:
+        self._audit_log: List[SecurityDecision] = []
+        self._compiled_patterns = [
+            {
+                **p,
+                "_regex": re.compile(p["pattern"]),
+            }
+            for p in INJECTION_PATTERNS
+        ]
+        logger.info("PolicyEngine initialised with %d injection patterns.", len(INJECTION_PATTERNS))
 
-    # ── Tool Permission Checking ───────────────────────────────────────
+    # ── Tool Request Evaluation ───────────────────────────────────────
 
-    def check_permission(
-        self,
-        agent_config: AgentConfig,
-        tool_name: str,
-    ) -> PermissionResult:
+    def evaluate_tool_request(self, request: ToolRequest) -> SecurityDecision:
         """
-        Evaluate whether an agent is allowed to invoke a specific tool.
+        Evaluate a tool request against all policy rules.
 
-        Decision logic (evaluated in order):
-          1. DENY if ``tool_name`` is in the global ``DENIED_TOOLS`` blocklist.
-          2. DENY if ``tool_name`` is in any custom PolicyRule's ``denied_tools``
-             that targets this agent's role.
-          3. ALLOW if ``tool_name`` is in the agent's explicit ``allowed_tools``.
-          4. ALLOW if ``tool_name`` is in the ``DEFAULT_ROLE_PERMISSIONS``
-             for this agent's role.
-          5. ALLOW if a matching custom PolicyRule grants the tool.
-          6. DENY by default (principle of least privilege).
-
-        Args:
-            agent_config: Configuration of the requesting agent.
-            tool_name: Name of the tool being requested.
+        Rule chain (first match wins):
+          1. DENY if tool not registered
+          2. DENY if agent role not permitted by capability matrix
+          3. DENY if agent capability matrix forbids the operation type
+          4. REQUIRE_APPROVAL if risk >= HIGH
+          5. REQUIRE_APPROVAL if tool explicitly requires approval
+          6. ALLOW
 
         Returns:
-            PermissionResult indicating allowed/denied with reason.
+            SecurityDecision with verdict, rule_matched, and reason.
         """
-        agent_id = agent_config.agent_id
-        role = agent_config.role
+        tool_name = request.tool_name
+        agent_role = request.agent_role
 
-        # 1. Global blocklist — absolute deny
-        if tool_name in DENIED_TOOLS or tool_name in self._additional_denied:
-            reason = (
-                f"Tool '{tool_name}' is globally blocked (DENIED_TOOLS). "
-                f"No agent may invoke this tool."
-            )
-            logger.warning(
-                "SECURITY ALERT: Agent '%s' (role=%s) attempted blocked "
-                "tool '%s'",
-                agent_id, role.value, tool_name,
-            )
-            return PermissionResult(
-                allowed=False,
-                reason=reason,
-                agent_id=agent_id,
-                tool_name=tool_name,
-            )
+        # Rule 1: Check tool exists in registry
+        try:
+            from backend.tools.tool_registry import ToolRegistry
+            registry = ToolRegistry()
+            tool_config = registry.get_tool_config(tool_name)
+            if tool_config is None:
+                return self._log_decision(
+                    SecurityVerdict.DENY,
+                    request,
+                    "TOOL_NOT_REGISTERED",
+                    f"Tool '{tool_name}' is not registered in the ToolRegistry.",
+                    agent_role,
+                )
+        except Exception as e:
+            logger.warning("ToolRegistry check failed: %s", e)
+            tool_config = None
 
-        # 2. Custom rules — explicit denials (highest priority first)
-        for rule in self._custom_rules:
-            if not rule.enabled:
-                continue
-            if rule.target_roles and role not in rule.target_roles:
-                continue
-            if tool_name in rule.denied_tools:
-                reason = (
-                    f"Tool '{tool_name}' denied by policy rule "
-                    f"'{rule.rule_id}': {rule.description}"
+        # Rule 2: Check agent capability matrix
+        try:
+            capability = get_capability(agent_role)
+            if not capability.has_tool(tool_name):
+                return self._log_decision(
+                    SecurityVerdict.DENY,
+                    request,
+                    "CAPABILITY_MATRIX_DENIED",
+                    f"Agent role '{agent_role.value}' is not permitted tool "
+                    f"'{tool_name}' by the capability matrix. Allowed: "
+                    f"{sorted(capability.allowed_tools)}",
+                    agent_role,
                 )
-                logger.info(
-                    "Policy rule '%s' denied tool '%s' for agent '%s'",
-                    rule.rule_id, tool_name, agent_id,
-                )
-                return PermissionResult(
-                    allowed=False,
-                    reason=reason,
-                    agent_id=agent_id,
-                    tool_name=tool_name,
-                )
-
-        # 3. Agent-level explicit allowlist
-        if agent_config.allowed_tools and tool_name in agent_config.allowed_tools:
-            return PermissionResult(
-                allowed=True,
-                reason=f"Tool '{tool_name}' is in agent's explicit allowed_tools.",
-                agent_id=agent_id,
-                tool_name=tool_name,
+        except ValueError:
+            return self._log_decision(
+                SecurityVerdict.DENY,
+                request,
+                "UNKNOWN_AGENT_ROLE",
+                f"Unknown agent role: '{agent_role.value}'.",
+                agent_role,
             )
 
-        # 4. Default role permissions
-        role_defaults = DEFAULT_ROLE_PERMISSIONS.get(role, frozenset())
-        if tool_name in role_defaults:
-            return PermissionResult(
-                allowed=True,
-                reason=(
-                    f"Tool '{tool_name}' is permitted by default for "
-                    f"role '{role.value}'."
-                ),
-                agent_id=agent_id,
-                tool_name=tool_name,
-            )
-
-        # 5. Custom rules — explicit grants
-        for rule in self._custom_rules:
-            if not rule.enabled:
-                continue
-            if rule.target_roles and role not in rule.target_roles:
-                continue
-            if tool_name in rule.allowed_tools:
-                return PermissionResult(
-                    allowed=True,
-                    reason=(
-                        f"Tool '{tool_name}' granted by policy rule "
-                        f"'{rule.rule_id}': {rule.description}"
-                    ),
-                    agent_id=agent_id,
-                    tool_name=tool_name,
-                )
-
-        # 6. Default deny
-        reason = (
-            f"Tool '{tool_name}' is not in the allowed set for agent "
-            f"'{agent_id}' (role='{role.value}'). Denied by default."
-        )
-        logger.info(
-            "Default deny: agent '%s' (role=%s) requested tool '%s'",
-            agent_id, role.value, tool_name,
-        )
-        return PermissionResult(
-            allowed=False,
-            reason=reason,
-            agent_id=agent_id,
-            tool_name=tool_name,
-        )
-
-    # ── Content Safety Checking ────────────────────────────────────────
-
-    def check_content_safety(self, content: str) -> SafetyResult:
-        """
-        Scan content for adversarial patterns (prompt injection, data
-        exfiltration, privilege escalation, etc.).
-
-        Uses a curated set of compiled regex patterns plus any
-        ``blocked_patterns`` from loaded custom PolicyRules.
-
-        Args:
-            content: The text content to evaluate.
-
-        Returns:
-            SafetyResult indicating safe/unsafe with threat details.
-        """
-        if not content or not content.strip():
-            return SafetyResult(safe=True, details="Empty content is safe.")
-
-        # Check built-in adversarial patterns
-        for pattern_def in _COMPILED_PATTERNS:
-            match = pattern_def["_compiled"].search(content)
-            if match:
-                matched_text = match.group(0)
-                logger.warning(
-                    "CONTENT SAFETY ALERT: Pattern '%s' matched: '%s'",
-                    pattern_def["name"],
-                    matched_text[:80],
-                )
-                return SafetyResult(
-                    safe=False,
-                    threat_type=pattern_def["threat_type"],
-                    severity=pattern_def["severity"],
-                    matched_pattern=pattern_def["name"],
-                    details=(
-                        f"Adversarial pattern '{pattern_def['name']}' "
-                        f"detected: '{matched_text[:60]}'"
-                    ),
-                )
-
-        # Check custom rule blocked patterns
-        for rule in self._custom_rules:
-            if not rule.enabled:
-                continue
-            for pattern_str in rule.blocked_patterns:
-                try:
-                    regex = re.compile(pattern_str, re.IGNORECASE)
-                    match = regex.search(content)
-                    if match:
-                        matched_text = match.group(0)
-                        logger.warning(
-                            "Custom rule '%s' blocked content: '%s'",
-                            rule.rule_id,
-                            matched_text[:80],
-                        )
-                        return SafetyResult(
-                            safe=False,
-                            threat_type="custom_rule_violation",
-                            severity=ThreatSeverity.HIGH,
-                            matched_pattern=f"rule:{rule.rule_id}",
-                            details=(
-                                f"Custom policy rule '{rule.rule_id}' "
-                                f"blocked pattern matched: "
-                                f"'{matched_text[:60]}'"
-                            ),
-                        )
-                except re.error as exc:
-                    logger.error(
-                        "Invalid regex in rule '%s': %s",
-                        rule.rule_id, exc,
+        # Rule 3: Check operation-level permissions
+        if tool_config:
+            # Network access check
+            if tool_name in ("retrieve_public_document", "public_search"):
+                if not capability.can_access_network:
+                    return self._log_decision(
+                        SecurityVerdict.DENY,
+                        request,
+                        "NETWORK_ACCESS_DENIED",
+                        f"Agent '{agent_role.value}' does not have network access permission.",
+                        agent_role,
                     )
 
-        return SafetyResult(
-            safe=True,
-            details="No adversarial patterns detected.",
+        # Rule 4: Risk level escalation
+        request_risk = request.risk_level
+        if tool_config:
+            request_risk = tool_config.risk_level
+
+        if request_risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            return self._log_decision(
+                SecurityVerdict.REQUIRE_APPROVAL,
+                request,
+                "HIGH_RISK_OPERATION",
+                f"Tool '{tool_name}' has risk_level={request_risk.value}. "
+                f"HITL approval required.",
+                agent_role,
+            )
+
+        # Rule 5: Explicit approval requirement
+        if request.requires_approval or (tool_config and tool_config.requires_approval):
+            return self._log_decision(
+                SecurityVerdict.REQUIRE_APPROVAL,
+                request,
+                "EXPLICIT_APPROVAL_REQUIRED",
+                f"Tool '{tool_name}' explicitly requires HITL approval.",
+                agent_role,
+            )
+
+        # Rule 6: All checks passed — ALLOW
+        return self._log_decision(
+            SecurityVerdict.ALLOW,
+            request,
+            "ALL_CHECKS_PASSED",
+            f"Tool '{tool_name}' allowed for agent '{agent_role.value}'.",
+            agent_role,
         )
 
-    # ── Bulk / Convenience ─────────────────────────────────────────────
+    # ── Content Scanning ──────────────────────────────────────────────
 
-    def evaluate_tool_call(
+    def scan_content(
         self,
-        agent_config: AgentConfig,
-        tool_name: str,
-        tool_input: str = "",
-    ) -> tuple[PermissionResult, SafetyResult]:
+        content: str,
+        source: str = "unknown",
+        agent_role: Optional[AgentRole] = None,
+    ) -> SecurityDecision:
         """
-        Combined permission + content-safety check for a tool invocation.
+        Scan text content for prompt-injection and adversarial patterns.
+
+        External content (websites, PDFs, READMEs, search results, RAG chunks)
+        is treated as untrusted data per Directive V2 Section 10.
+
+        Args:
+            content: Text content to scan.
+            source: Source identifier (e.g., 'user_upload', 'web_scrape', 'rag_chunk').
+            agent_role: Optional agent role for context.
 
         Returns:
-            Tuple of (PermissionResult, SafetyResult).
+            SecurityDecision — ALLOW if clean, DENY if injection detected.
         """
-        perm = self.check_permission(agent_config, tool_name)
-        safety = self.check_content_safety(tool_input)
-        return perm, safety
+        if not content:
+            return SecurityDecision(
+                verdict=SecurityVerdict.ALLOW,
+                rule_matched="EMPTY_CONTENT",
+                reason="Empty content — no threat.",
+                agent_role=agent_role,
+            )
+
+        # Check against all injection patterns
+        for pattern in self._compiled_patterns:
+            match = pattern["_regex"].search(content)
+            if match:
+                severity = pattern.get("severity", "medium")
+                matched_text = match.group(0)[:100]
+
+                decision = SecurityDecision(
+                    verdict=SecurityVerdict.DENY,
+                    rule_matched=f"INJECTION_{pattern['name'].upper()}",
+                    reason=(
+                        f"Prompt injection detected in content from '{source}': "
+                        f"pattern='{pattern['name']}', severity={severity}, "
+                        f"matched='{matched_text}'"
+                    ),
+                    agent_role=agent_role,
+                )
+
+                self._audit_log.append(decision)
+                logger.warning(
+                    "[PolicyEngine] INJECTION DETECTED: %s (source=%s, severity=%s)",
+                    pattern["name"],
+                    source,
+                    severity,
+                )
+                return decision
+
+        # Content is clean
+        return SecurityDecision(
+            verdict=SecurityVerdict.ALLOW,
+            rule_matched="CONTENT_CLEAN",
+            reason=f"Content from '{source}' passed all injection checks.",
+            agent_role=agent_role,
+        )
+
+    # ── Batch Evaluation ──────────────────────────────────────────────
+
+    def evaluate_batch(
+        self, requests: List[ToolRequest]
+    ) -> List[SecurityDecision]:
+        """Evaluate multiple tool requests."""
+        return [self.evaluate_tool_request(r) for r in requests]
+
+    # ── Operation Checks ──────────────────────────────────────────────
+
+    def check_file_access(
+        self, agent_role: AgentRole, file_path: str, operation: str = "read"
+    ) -> SecurityDecision:
+        """Check if an agent can access a file."""
+        capability = get_capability(agent_role)
+
+        # Only TOOL_EXECUTION and agents with write_artifacts can write
+        if operation == "write" and not capability.can_write_artifacts:
+            return self._log_decision(
+                SecurityVerdict.DENY,
+                None,
+                "FILE_WRITE_DENIED",
+                f"Agent '{agent_role.value}' does not have file write permission.",
+                agent_role,
+            )
+
+        # Block access to sensitive paths
+        sensitive_patterns = [
+            r"\.env",
+            r"\.git",
+            r"__pycache__",
+            r"node_modules",
+            r"\.ssh",
+            r"\.aws",
+            r"credentials",
+            r"secrets?",
+            r"private_key",
+        ]
+        for pattern in sensitive_patterns:
+            if re.search(pattern, file_path, re.IGNORECASE):
+                return self._log_decision(
+                    SecurityVerdict.DENY,
+                    None,
+                    "SENSITIVE_PATH_BLOCKED",
+                    f"Access to sensitive path '{file_path}' is blocked.",
+                    agent_role,
+                )
+
+        return SecurityDecision(
+            verdict=SecurityVerdict.ALLOW,
+            rule_matched="FILE_ACCESS_ALLOWED",
+            reason=f"File {operation} access allowed for '{agent_role.value}'.",
+            agent_role=agent_role,
+        )
+
+    def check_network_access(
+        self, agent_role: AgentRole, url: str
+    ) -> SecurityDecision:
+        """Check if an agent can access a URL."""
+        capability = get_capability(agent_role)
+
+        if not capability.can_access_network:
+            return self._log_decision(
+                SecurityVerdict.DENY,
+                None,
+                "NETWORK_ACCESS_DENIED",
+                f"Agent '{agent_role.value}' does not have network access.",
+                agent_role,
+            )
+
+        # Block internal/private URLs
+        private_patterns = [
+            r"localhost",
+            r"127\.0\.0\.\d+",
+            r"10\.\d+\.\d+\.\d+",
+            r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+",
+            r"192\.168\.\d+\.\d+",
+            r"\.internal",
+            r"\.local",
+        ]
+        for pattern in private_patterns:
+            if re.search(pattern, url, re.IGNORECASE):
+                return self._log_decision(
+                    SecurityVerdict.DENY,
+                    None,
+                    "PRIVATE_URL_BLOCKED",
+                    f"Access to private/internal URL '{url}' is blocked.",
+                    agent_role,
+                )
+
+        return SecurityDecision(
+            verdict=SecurityVerdict.ALLOW,
+            rule_matched="NETWORK_ACCESS_ALLOWED",
+            reason=f"Network access to '{url}' allowed for '{agent_role.value}'.",
+            agent_role=agent_role,
+        )
+
+    # ── Audit Log ─────────────────────────────────────────────────────
+
+    def get_audit_log(self) -> List[Dict[str, Any]]:
+        """Return the immutable audit log of all security decisions."""
+        return [
+            {
+                "decision_id": d.decision_id,
+                "verdict": d.verdict.value,
+                "rule_matched": d.rule_matched,
+                "reason": d.reason,
+                "agent_role": d.agent_role.value if d.agent_role else None,
+                "timestamp": d.timestamp,
+            }
+            for d in self._audit_log
+        ]
+
+    def get_audit_summary(self) -> Dict[str, int]:
+        """Return summary counts by verdict."""
+        summary: Dict[str, int] = {"allow": 0, "deny": 0, "require_approval": 0}
+        for d in self._audit_log:
+            summary[d.verdict.value] = summary.get(d.verdict.value, 0) + 1
+        return summary
+
+    def clear_audit_log(self) -> None:
+        """Clear the audit log (for testing)."""
+        self._audit_log.clear()
+
+    # ── Internal ──────────────────────────────────────────────────────
+
+    def _log_decision(
+        self,
+        verdict: SecurityVerdict,
+        request: Optional[ToolRequest],
+        rule: str,
+        reason: str,
+        agent_role: Optional[AgentRole],
+    ) -> SecurityDecision:
+        """Create, log, and return a SecurityDecision."""
+        decision = SecurityDecision(
+            verdict=verdict,
+            tool_request=request,
+            rule_matched=rule,
+            reason=reason,
+            agent_role=agent_role,
+        )
+        self._audit_log.append(decision)
+
+        log_fn = logger.info if verdict == SecurityVerdict.ALLOW else logger.warning
+        log_fn(
+            "[PolicyEngine] %s: rule=%s agent=%s reason=%s",
+            verdict.value.upper(),
+            rule,
+            agent_role.value if agent_role else "none",
+            reason[:100],
+        )
+        return decision

@@ -1,336 +1,431 @@
 """
-AE-03 Event Tracer — Append-Only Execution Trace Logger.
+AE-03 Cost Tracker & Immutable Audit Log (Directive V2).
 
 Provides:
-  - ExecutionTracer: thread-safe, append-only event log keyed by run_id.
-    Records every TraceEvent emitted during a run's lifecycle and
-    supports export to structured JSON for replay and debugging.
-  - RunStore: persistent in-memory store of completed run traces,
-    indexed by run_id for retrieval via the REST API.
+  - ``CostTracker``: Per-run and per-provider token & cost aggregation
+  - ``AuditLog``: Immutable, append-only log of all security and workflow events
+  - ``RunTrace``: Complete trace record for a finished run
+
+The CostTracker integrates with the ModelRouter's ProviderStats and the
+EventTracker to provide real-time and post-hoc cost visibility.
+
+The AuditLog stores security decisions, approval events, and policy
+violations as immutable records for compliance and debugging.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from backend.schemas.artifacts import (
-    ProviderCostBreakdown,
-    RunReport,
-    TraceEvent,
-    TraceEventType,
-)
-from backend.schemas.contracts import ExecutionGraph
 
 logger = logging.getLogger(__name__)
 
 
-# ── Execution Tracer ───────────────────────────────────────────────────
+# ── Cost Entry ────────────────────────────────────────────────────────
 
 
-class ExecutionTracer:
+class CostEntry:
+    """A single cost record for an LLM invocation."""
+
+    __slots__ = (
+        "entry_id", "run_id", "provider", "model", "agent_role",
+        "task_id", "prompt_tokens", "completion_tokens", "total_tokens",
+        "cost_usd", "latency_ms", "timestamp",
+    )
+
+    def __init__(
+        self,
+        run_id: str = "",
+        provider: str = "",
+        model: str = "",
+        agent_role: str = "",
+        task_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: float = 0.0,
+    ):
+        self.entry_id = f"cost-{uuid.uuid4().hex[:8]}"
+        self.run_id = run_id
+        self.provider = provider
+        self.model = model
+        self.agent_role = agent_role
+        self.task_id = task_id
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = prompt_tokens + completion_tokens
+        self.cost_usd = cost_usd
+        self.latency_ms = latency_ms
+        self.timestamp = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entry_id": self.entry_id,
+            "run_id": self.run_id,
+            "provider": self.provider,
+            "model": self.model,
+            "agent_role": self.agent_role,
+            "task_id": self.task_id,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "latency_ms": round(self.latency_ms, 1),
+            "timestamp": self.timestamp,
+        }
+
+
+# ── Cost Tracker ──────────────────────────────────────────────────────
+
+
+class CostTracker:
     """
-    Thread-safe, append-only event trace logger for a single execution run.
+    Per-run and per-provider token & cost aggregation.
 
-    Generates a unique ``run_id`` at creation time and attaches it to
-    every recorded event.  The full event log is exportable to JSON for
-    replay, cost analysis, and debugging.
+    Tracks every LLM invocation's token usage and cost, providing
+    real-time totals and per-provider breakdowns.
 
     Usage::
 
-        tracer = ExecutionTracer()
-        tracer.emit(TraceEventType.RUN_START, data={"graph_id": "g-1"})
-        tracer.emit(TraceEventType.NODE_START, node_id="n-1")
-        # ... execution ...
-        trace_json = tracer.export_json()
+        tracker = CostTracker()
+        tracker.record(run_id="run-123", provider="google",
+                       model="gemini-1.5-pro", prompt_tokens=500,
+                       completion_tokens=200, cost_usd=0.0016)
+        summary = tracker.get_run_summary("run-123")
     """
 
-    def __init__(self, run_id: Optional[str] = None):
-        self._run_id: str = run_id or f"run-{uuid.uuid4().hex[:8]}"
-        self._events: List[TraceEvent] = []
-        self._lock = threading.Lock()
-        self._created_at: float = time.time()
+    def __init__(self) -> None:
+        self._entries: Dict[str, List[CostEntry]] = {}  # run_id -> entries
+        self._all_entries: List[CostEntry] = []
 
-    @property
-    def run_id(self) -> str:
-        return self._run_id
-
-    @property
-    def event_count(self) -> int:
-        with self._lock:
-            return len(self._events)
-
-    @property
-    def created_at(self) -> float:
-        return self._created_at
-
-    # ── Event Recording ────────────────────────────────────────────────
-
-    def emit(
+    def record(
         self,
-        event_type: TraceEventType,
-        *,
-        node_id: Optional[str] = None,
-        data: Optional[Dict[str, Any]] = None,
-    ) -> TraceEvent:
-        """
-        Record a new trace event.
-
-        Args:
-            event_type: The category of event to record.
-            node_id: Optional agent node ID this event relates to.
-            data: Optional event-specific payload dictionary.
-
-        Returns:
-            The created TraceEvent instance.
-        """
-        event = TraceEvent(
-            event_type=event_type,
-            run_id=self._run_id,
-            node_id=node_id,
-            data=data or {},
+        run_id: str,
+        provider: str = "",
+        model: str = "",
+        agent_role: str = "",
+        task_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: float = 0.0,
+    ) -> CostEntry:
+        """Record a single LLM invocation cost."""
+        entry = CostEntry(
+            run_id=run_id,
+            provider=provider,
+            model=model,
+            agent_role=agent_role,
+            task_id=task_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
         )
+        self._entries.setdefault(run_id, []).append(entry)
+        self._all_entries.append(entry)
+        return entry
 
-        with self._lock:
-            self._events.append(event)
+    def get_run_summary(self, run_id: str) -> Dict[str, Any]:
+        """Get cost summary for a specific run."""
+        entries = self._entries.get(run_id, [])
+        if not entries:
+            return {"run_id": run_id, "total_cost_usd": 0.0, "total_tokens": 0, "calls": 0}
 
-        logger.debug(
-            "Trace [%s] %s node=%s data_keys=%s",
-            self._run_id,
-            event_type.value,
-            node_id or "-",
-            list((data or {}).keys()),
-        )
-        return event
+        total_tokens = sum(e.total_tokens for e in entries)
+        total_cost = sum(e.cost_usd for e in entries)
+        total_latency = sum(e.latency_ms for e in entries)
 
-    def emit_from_existing(self, event: TraceEvent) -> None:
-        """
-        Append a pre-created TraceEvent (e.g. from the executor's
-        internal emit) into this tracer's log.  Overwrites event.run_id.
-        """
-        event.run_id = self._run_id
-        with self._lock:
-            self._events.append(event)
+        # Per-provider breakdown
+        provider_breakdown: Dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            p = entry.provider or "unknown"
+            if p not in provider_breakdown:
+                provider_breakdown[p] = {
+                    "calls": 0, "tokens": 0, "cost_usd": 0.0, "latency_ms": 0.0,
+                }
+            provider_breakdown[p]["calls"] += 1
+            provider_breakdown[p]["tokens"] += entry.total_tokens
+            provider_breakdown[p]["cost_usd"] += entry.cost_usd
+            provider_breakdown[p]["latency_ms"] += entry.latency_ms
 
-    def ingest_events(self, events: List[TraceEvent]) -> None:
-        """
-        Bulk-import a list of TraceEvents (e.g. from the executor's
-        trace_events list after a run completes).
-        """
-        with self._lock:
-            for evt in events:
-                evt.run_id = self._run_id
-                self._events.append(evt)
-
-        logger.info(
-            "Ingested %d trace events into run '%s'",
-            len(events), self._run_id,
-        )
-
-    # ── Querying ───────────────────────────────────────────────────────
-
-    def get_events(
-        self,
-        event_type: Optional[TraceEventType] = None,
-        node_id: Optional[str] = None,
-    ) -> List[TraceEvent]:
-        """
-        Retrieve events, optionally filtered by type and/or node.
-
-        Args:
-            event_type: Filter to only this event type.
-            node_id: Filter to only events for this node.
-
-        Returns:
-            List of matching TraceEvent objects, in chronological order.
-        """
-        with self._lock:
-            result = list(self._events)
-
-        if event_type is not None:
-            result = [e for e in result if e.event_type == event_type]
-        if node_id is not None:
-            result = [e for e in result if e.node_id == node_id]
-
-        return result
-
-    def get_all_events(self) -> List[TraceEvent]:
-        """Return all events in chronological order."""
-        with self._lock:
-            return list(self._events)
-
-    def get_timeline(self) -> List[Dict[str, Any]]:
-        """
-        Return a compact timeline view of all events.
-
-        Each entry is a dict with event_id, type, node_id, timestamp,
-        and a flattened data summary.
-        """
-        with self._lock:
-            events = list(self._events)
-
-        return [
-            {
-                "event_id": e.event_id,
-                "event_type": e.event_type.value,
-                "node_id": e.node_id,
-                "timestamp": e.timestamp,
-                "elapsed_s": round(e.timestamp - self._created_at, 3),
-                "data_summary": _summarise_data(e.data),
-            }
-            for e in events
-        ]
-
-    # ── Export ─────────────────────────────────────────────────────────
-
-    def export_dict(self) -> Dict[str, Any]:
-        """
-        Export the full trace as a serialisable dictionary.
-
-        Suitable for JSON serialisation, persistence, and replay.
-        """
-        with self._lock:
-            events = list(self._events)
+        # Round values
+        for p in provider_breakdown:
+            provider_breakdown[p]["cost_usd"] = round(provider_breakdown[p]["cost_usd"], 6)
+            provider_breakdown[p]["latency_ms"] = round(provider_breakdown[p]["latency_ms"], 1)
 
         return {
-            "run_id": self._run_id,
-            "created_at": self._created_at,
-            "event_count": len(events),
-            "events": [e.model_dump(mode="json") for e in events],
+            "run_id": run_id,
+            "total_cost_usd": round(total_cost, 6),
+            "total_tokens": total_tokens,
+            "total_prompt_tokens": sum(e.prompt_tokens for e in entries),
+            "total_completion_tokens": sum(e.completion_tokens for e in entries),
+            "total_latency_ms": round(total_latency, 1),
+            "avg_latency_ms": round(total_latency / len(entries), 1),
+            "calls": len(entries),
+            "provider_breakdown": provider_breakdown,
         }
 
-    def export_json(self, indent: int = 2) -> str:
-        """Export the full trace as a formatted JSON string."""
-        return json.dumps(self.export_dict(), indent=indent, default=str)
+    def get_global_summary(self) -> Dict[str, Any]:
+        """Get cost summary across all runs."""
+        total_tokens = sum(e.total_tokens for e in self._all_entries)
+        total_cost = sum(e.cost_usd for e in self._all_entries)
+        return {
+            "total_runs": len(self._entries),
+            "total_calls": len(self._all_entries),
+            "total_tokens": total_tokens,
+            "total_cost_usd": round(total_cost, 6),
+        }
 
-    def export_to_file(self, path: str | Path) -> Path:
-        """
-        Write the trace to a JSON file.
+    def get_entries(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return all cost entries for a run."""
+        return [e.to_dict() for e in self._entries.get(run_id, [])]
 
-        Args:
-            path: Destination file path.
+    def is_over_budget(self, run_id: str, max_cost: float) -> bool:
+        """Check if a run has exceeded its budget."""
+        entries = self._entries.get(run_id, [])
+        return sum(e.cost_usd for e in entries) > max_cost
 
-        Returns:
-            The resolved Path object.
-        """
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(self.export_json(), encoding="utf-8")
-        logger.info("Trace exported to %s (%d events)", out, self.event_count)
-        return out
-
-    def clear(self) -> None:
-        """Remove all recorded events."""
-        with self._lock:
-            self._events.clear()
-
-
-# ── Run Store ──────────────────────────────────────────────────────────
+    def is_over_token_limit(self, run_id: str, max_tokens: int) -> bool:
+        """Check if a run has exceeded its token limit."""
+        entries = self._entries.get(run_id, [])
+        return sum(e.total_tokens for e in entries) > max_tokens
 
 
-class RunRecord:
+# ── Audit Log ─────────────────────────────────────────────────────────
+
+
+class AuditEntry:
+    """An immutable audit log entry."""
+
+    __slots__ = (
+        "entry_id", "timestamp", "run_id", "event_type",
+        "agent_role", "action", "details", "severity",
+    )
+
+    def __init__(
+        self,
+        event_type: str,
+        run_id: str = "",
+        agent_role: str = "",
+        action: str = "",
+        details: Optional[Dict[str, Any]] = None,
+        severity: str = "info",
+    ):
+        self.entry_id = f"audit-{uuid.uuid4().hex[:8]}"
+        self.timestamp = time.time()
+        self.run_id = run_id
+        self.event_type = event_type
+        self.agent_role = agent_role
+        self.action = action
+        self.details = details or {}
+        self.severity = severity
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entry_id": self.entry_id,
+            "timestamp": self.timestamp,
+            "run_id": self.run_id,
+            "event_type": self.event_type,
+            "agent_role": self.agent_role,
+            "action": self.action,
+            "details": self.details,
+            "severity": self.severity,
+        }
+
+
+class AuditLog:
     """
-    A stored record of a completed execution run, including its trace,
-    graph configuration, and cost summary.
+    Immutable, append-only audit log for security and workflow events.
+
+    Stores security decisions, approval events, policy violations,
+    and significant workflow transitions as permanent records.
+
+    Usage::
+
+        audit = AuditLog()
+        audit.log_security_decision(run_id="run-123", verdict="deny",
+                                     rule="TOOL_NOT_REGISTERED", ...)
+        audit.log_approval(run_id="run-123", approval_id="apr-456",
+                           action="approve", ...)
+        entries = audit.get_entries(run_id="run-123")
+    """
+
+    def __init__(self) -> None:
+        self._entries: List[AuditEntry] = []
+        self._by_run: Dict[str, List[AuditEntry]] = {}
+
+    def _append(self, entry: AuditEntry) -> AuditEntry:
+        """Append an entry (immutable add)."""
+        self._entries.append(entry)
+        if entry.run_id:
+            self._by_run.setdefault(entry.run_id, []).append(entry)
+        return entry
+
+    def log_security_decision(
+        self,
+        run_id: str,
+        verdict: str,
+        rule: str = "",
+        agent_role: str = "",
+        tool_name: str = "",
+        reason: str = "",
+    ) -> AuditEntry:
+        """Log a PolicyEngine security decision."""
+        severity = "warning" if verdict == "deny" else "info"
+        return self._append(AuditEntry(
+            event_type="SECURITY_DECISION",
+            run_id=run_id,
+            agent_role=agent_role,
+            action=verdict,
+            details={"rule": rule, "tool_name": tool_name, "reason": reason},
+            severity=severity,
+        ))
+
+    def log_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        action: str,
+        agent_role: str = "",
+        tool_name: str = "",
+        reason: str = "",
+    ) -> AuditEntry:
+        """Log an HITL approval event."""
+        return self._append(AuditEntry(
+            event_type="APPROVAL_EVENT",
+            run_id=run_id,
+            agent_role=agent_role,
+            action=action,
+            details={"approval_id": approval_id, "tool_name": tool_name, "reason": reason},
+            severity="info",
+        ))
+
+    def log_injection_detected(
+        self,
+        run_id: str,
+        pattern_name: str,
+        source: str = "",
+        matched_text: str = "",
+    ) -> AuditEntry:
+        """Log a prompt injection detection."""
+        return self._append(AuditEntry(
+            event_type="INJECTION_DETECTED",
+            run_id=run_id,
+            action="blocked",
+            details={"pattern": pattern_name, "source": source, "matched": matched_text[:100]},
+            severity="critical",
+        ))
+
+    def log_budget_exceeded(
+        self,
+        run_id: str,
+        current_cost: float,
+        max_cost: float,
+    ) -> AuditEntry:
+        """Log a budget limit violation."""
+        return self._append(AuditEntry(
+            event_type="BUDGET_EXCEEDED",
+            run_id=run_id,
+            action="budget_violation",
+            details={"current_cost_usd": current_cost, "max_cost_usd": max_cost},
+            severity="warning",
+        ))
+
+    def log_workflow_event(
+        self,
+        run_id: str,
+        event_type: str,
+        agent_role: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> AuditEntry:
+        """Log a general workflow event."""
+        return self._append(AuditEntry(
+            event_type=event_type,
+            run_id=run_id,
+            agent_role=agent_role,
+            action="recorded",
+            details=details or {},
+            severity="info",
+        ))
+
+    # ── Queries ───────────────────────────────────────────────────────
+
+    def get_entries(self, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return audit entries, optionally filtered by run_id."""
+        entries = self._by_run.get(run_id, []) if run_id else self._entries
+        return [e.to_dict() for e in entries]
+
+    def get_security_events(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return security-related entries for a run."""
+        return [
+            e.to_dict()
+            for e in self._by_run.get(run_id, [])
+            if e.event_type in ("SECURITY_DECISION", "INJECTION_DETECTED", "APPROVAL_EVENT")
+        ]
+
+    def get_violations(self, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return violation entries (denials, injections, budget exceeded)."""
+        source = self._by_run.get(run_id, []) if run_id else self._entries
+        return [
+            e.to_dict()
+            for e in source
+            if e.severity in ("warning", "critical") or e.action in ("deny", "blocked")
+        ]
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Return audit log summary."""
+        severity_counts: Dict[str, int] = {}
+        type_counts: Dict[str, int] = {}
+        for e in self._entries:
+            severity_counts[e.severity] = severity_counts.get(e.severity, 0) + 1
+            type_counts[e.event_type] = type_counts.get(e.event_type, 0) + 1
+        return {
+            "total_entries": len(self._entries),
+            "total_runs": len(self._by_run),
+            "by_severity": severity_counts,
+            "by_type": type_counts,
+        }
+
+
+# ── Run Trace ─────────────────────────────────────────────────────────
+
+
+class RunTrace:
+    """
+    Complete trace record for a finished run.
+
+    Aggregates events, cost entries, and audit entries into a single
+    exportable object for post-hoc analysis and replay.
     """
 
     def __init__(
         self,
         run_id: str,
-        tracer: ExecutionTracer,
-        graph: ExecutionGraph,
-        *,
-        goal_text: str = "",
-        run_report: Optional[RunReport] = None,
-        cost_summary: Optional[Dict[str, Any]] = None,
+        events: List[Dict[str, Any]],
+        cost_summary: Dict[str, Any],
+        audit_entries: List[Dict[str, Any]],
+        final_state: Optional[Dict[str, Any]] = None,
     ):
         self.run_id = run_id
-        self.tracer = tracer
-        self.graph = graph
-        self.goal_text = goal_text
-        self.run_report = run_report
-        self.cost_summary = cost_summary or {}
-        self.stored_at = time.time()
+        self.events = events
+        self.cost_summary = cost_summary
+        self.audit_entries = audit_entries
+        self.final_state = final_state or {}
+        self.created_at = time.time()
 
-    def to_summary_dict(self) -> Dict[str, Any]:
-        """Compact summary for listing endpoints."""
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "run_id": self.run_id,
-            "graph_id": self.graph.graph_id,
-            "goal_text": self.goal_text[:200],
-            "event_count": self.tracer.event_count,
-            "stored_at": self.stored_at,
-            "total_cost_usd": self.cost_summary.get("total_cost_usd", 0.0),
-            "total_tokens": self.cost_summary.get("total_tokens", 0),
+            "events": self.events,
+            "cost_summary": self.cost_summary,
+            "audit_entries": self.audit_entries,
+            "final_state": self.final_state,
+            "created_at": self.created_at,
         }
 
-
-class RunStore:
-    """
-    In-memory store of completed execution runs, indexed by run_id.
-
-    Provides the backing store for the REST API endpoints:
-      - GET /api/runs
-      - GET /api/runs/{run_id}
-      - GET /api/runs/{run_id}/export
-    """
-
-    def __init__(self) -> None:
-        self._runs: Dict[str, RunRecord] = {}
-        self._lock = threading.Lock()
-
-    def store(self, record: RunRecord) -> None:
-        """Store a completed run record."""
-        with self._lock:
-            self._runs[record.run_id] = record
-        logger.info("Stored run '%s' (%d events)", record.run_id, record.tracer.event_count)
-
-    def get(self, run_id: str) -> Optional[RunRecord]:
-        """Retrieve a run record by ID."""
-        with self._lock:
-            return self._runs.get(run_id)
-
-    def list_runs(self) -> List[Dict[str, Any]]:
-        """Return summary dicts for all stored runs, newest first."""
-        with self._lock:
-            records = list(self._runs.values())
-        records.sort(key=lambda r: r.stored_at, reverse=True)
-        return [r.to_summary_dict() for r in records]
-
-    def delete(self, run_id: str) -> bool:
-        """Remove a run record. Returns True if it existed."""
-        with self._lock:
-            return self._runs.pop(run_id, None) is not None
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._runs)
-
-    def __contains__(self, run_id: str) -> bool:
-        with self._lock:
-            return run_id in self._runs
-
-
-# ── Helpers ────────────────────────────────────────────────────────────
-
-
-def _summarise_data(data: Dict[str, Any], max_len: int = 120) -> str:
-    """
-    Create a short string summary of a data dict for timeline views.
-
-    Truncates long values to keep the timeline compact.
-    """
-    if not data:
-        return ""
-    parts = []
-    for k, v in data.items():
-        v_str = str(v)
-        if len(v_str) > max_len:
-            v_str = v_str[:max_len] + "…"
-        parts.append(f"{k}={v_str}")
-    return "; ".join(parts)
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), default=str, indent=2)

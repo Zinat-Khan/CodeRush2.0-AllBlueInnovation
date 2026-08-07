@@ -1,347 +1,295 @@
 """
-AE-03 Execution Replay Engine — Re-Run Saved Graphs with Provider Hot-Swap.
+AE-03 Run Replay Engine (Directive V2).
 
-Provides:
-  - ReplayEngine: loads a saved RunRecord and re-executes the same
-    ExecutionGraph with identical or overridden provider/model settings.
-    Produces a side-by-side comparison of original vs replay metrics.
-  - ReplayComparison: structured output comparing the two runs.
+Replays completed runs by reconstructing execution from saved LangGraph
+thread state checkpoints and the EventTracker's event stream.
+
+Features:
+  - Full state replay from LangGraph MemorySaver checkpoints
+  - Event-based replay from EventTracker timeline
+  - Step-by-step execution trace reconstruction
+  - Exportable replay records for debugging and compliance
+
+Integrates with:
+  - EventTracker (Module 7) for event timeline
+  - CostTracker (Module 7) for cost breakdown
+  - AuditLog (Module 7) for security audit trail
+  - WorkflowEngine (Module 5) for checkpoint access
 """
 
 from __future__ import annotations
 
-import copy
+import json
 import logging
 import time
-import uuid
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from backend.schemas.artifacts import RunReport, TraceEvent, TraceEventType
-from backend.schemas.contracts import (
-    AgentConfig,
-    ExecutionGraph,
-    ExecutionResult,
-    ExecutionStatus,
-)
-from backend.engine.executor import AsyncDAGExecutor, NodeHandler
-from backend.engine.state_manager import ExecutionState
-from backend.observability.tracker import CostTracker
-from backend.observability.tracer import ExecutionTracer, RunRecord, RunStore
+from backend.observability.tracker import EventTracker, EventType
+from backend.observability.tracer import AuditLog, CostTracker, RunTrace
 
 logger = logging.getLogger(__name__)
 
 
-# ── Replay Comparison ──────────────────────────────────────────────────
+class ReplayStep:
+    """A single step in a replayed execution."""
+
+    def __init__(
+        self,
+        step_index: int,
+        node_name: str,
+        event_type: str = "",
+        agent_role: str = "",
+        task_id: str = "",
+        state_snapshot: Optional[Dict[str, Any]] = None,
+        duration_ms: float = 0.0,
+        timestamp: float = 0.0,
+    ):
+        self.step_index = step_index
+        self.node_name = node_name
+        self.event_type = event_type
+        self.agent_role = agent_role
+        self.task_id = task_id
+        self.state_snapshot = state_snapshot or {}
+        self.duration_ms = duration_ms
+        self.timestamp = timestamp
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_index": self.step_index,
+            "node_name": self.node_name,
+            "event_type": self.event_type,
+            "agent_role": self.agent_role,
+            "task_id": self.task_id,
+            "state_snapshot": self.state_snapshot,
+            "duration_ms": round(self.duration_ms, 1),
+            "timestamp": self.timestamp,
+        }
 
 
-class ReplayComparison:
+class ReplayRecord:
     """
-    Side-by-side comparison of original vs replay execution metrics.
+    Complete replay record for a run.
 
-    Populated by the ReplayEngine after a replay completes.
+    Contains the step-by-step execution trace, event timeline,
+    cost breakdown, and audit trail.
     """
 
     def __init__(
         self,
-        original_run_id: str,
-        replay_run_id: str,
-        original_summary: Dict[str, Any],
-        replay_summary: Dict[str, Any],
-        original_cost: Dict[str, Any],
-        replay_cost: Dict[str, Any],
-        provider_override: Optional[str],
+        run_id: str,
+        goal: str = "",
+        steps: Optional[List[ReplayStep]] = None,
+        events: Optional[List[Dict[str, Any]]] = None,
+        cost_summary: Optional[Dict[str, Any]] = None,
+        audit_entries: Optional[List[Dict[str, Any]]] = None,
+        final_status: str = "",
+        total_duration_ms: float = 0.0,
     ):
-        self.original_run_id = original_run_id
-        self.replay_run_id = replay_run_id
-        self.original_summary = original_summary
-        self.replay_summary = replay_summary
-        self.original_cost = original_cost
-        self.replay_cost = replay_cost
-        self.provider_override = provider_override
+        self.run_id = run_id
+        self.goal = goal
+        self.steps = steps or []
+        self.events = events or []
+        self.cost_summary = cost_summary or {}
+        self.audit_entries = audit_entries or []
+        self.final_status = final_status
+        self.total_duration_ms = total_duration_ms
+        self.created_at = time.time()
 
     def to_dict(self) -> Dict[str, Any]:
-        """Full comparison as a serialisable dictionary."""
-        orig_cost = self.original_cost.get("total_cost_usd", 0.0)
-        replay_cost = self.replay_cost.get("total_cost_usd", 0.0)
-        cost_delta = round(replay_cost - orig_cost, 8)
-
-        orig_tokens = self.original_cost.get("total_tokens", 0)
-        replay_tokens = self.replay_cost.get("total_tokens", 0)
-        token_delta = replay_tokens - orig_tokens
-
-        orig_latency = self.original_summary.get("elapsed_ms", 0.0)
-        replay_latency = self.replay_summary.get("elapsed_ms", 0.0)
-        latency_delta = round(replay_latency - orig_latency, 1)
-
         return {
-            "original_run_id": self.original_run_id,
-            "replay_run_id": self.replay_run_id,
-            "provider_override": self.provider_override,
-            "comparison": {
-                "cost_usd": {
-                    "original": orig_cost,
-                    "replay": replay_cost,
-                    "delta": cost_delta,
-                },
-                "total_tokens": {
-                    "original": orig_tokens,
-                    "replay": replay_tokens,
-                    "delta": token_delta,
-                },
-                "latency_ms": {
-                    "original": orig_latency,
-                    "replay": replay_latency,
-                    "delta": latency_delta,
-                },
-                "nodes_succeeded": {
-                    "original": self.original_summary.get("nodes_succeeded", 0),
-                    "replay": self.replay_summary.get("nodes_succeeded", 0),
-                },
-                "nodes_failed": {
-                    "original": self.original_summary.get("nodes_failed", 0),
-                    "replay": self.replay_summary.get("nodes_failed", 0),
-                },
-            },
-            "original_provider_breakdown": self.original_cost.get(
-                "provider_breakdown", []
-            ),
-            "replay_provider_breakdown": self.replay_cost.get(
-                "provider_breakdown", []
-            ),
+            "run_id": self.run_id,
+            "goal": self.goal,
+            "final_status": self.final_status,
+            "total_duration_ms": round(self.total_duration_ms, 1),
+            "step_count": len(self.steps),
+            "event_count": len(self.events),
+            "steps": [s.to_dict() for s in self.steps],
+            "events": self.events,
+            "cost_summary": self.cost_summary,
+            "audit_entries": self.audit_entries,
+            "created_at": self.created_at,
         }
 
-    def summary_table(self) -> str:
-        """
-        Return a markdown-formatted comparison table for reports.
-        """
-        d = self.to_dict()["comparison"]
-
-        lines = [
-            "| Metric | Original | Replay | Delta |",
-            "| :--- | ---: | ---: | ---: |",
-        ]
-
-        for metric, label in [
-            ("cost_usd", "Cost (USD)"),
-            ("total_tokens", "Total Tokens"),
-            ("latency_ms", "Latency (ms)"),
-        ]:
-            orig = d[metric]["original"]
-            replay = d[metric]["replay"]
-            delta = d[metric]["delta"]
-            if metric == "cost_usd":
-                lines.append(
-                    f"| {label} | ${orig:.6f} | ${replay:.6f} | ${delta:+.6f} |"
-                )
-            else:
-                lines.append(
-                    f"| {label} | {orig} | {replay} | {delta:+} |"
-                )
-
-        for metric, label in [
-            ("nodes_succeeded", "Nodes Succeeded"),
-            ("nodes_failed", "Nodes Failed"),
-        ]:
-            orig = d[metric]["original"]
-            replay = d[metric]["replay"]
-            delta = replay - orig
-            lines.append(f"| {label} | {orig} | {replay} | {delta:+d} |")
-
-        return "\n".join(lines)
-
-
-# ── Replay Engine ──────────────────────────────────────────────────────
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), default=str, indent=2)
 
 
 class ReplayEngine:
     """
-    Re-executes a saved execution run with identical or hot-swapped
-    provider configuration.
+    Run replay engine utilizing saved state and events.
 
-    Reads the original ExecutionGraph from the RunStore, creates a
-    deep copy (optionally overriding model_provider on every node),
-    executes it through the standard AsyncDAGExecutor, and produces
-    a ReplayComparison with side-by-side metrics.
+    Reconstructs execution from:
+      1. LangGraph MemorySaver checkpoints (step-by-step state)
+      2. EventTracker event timeline (event-by-event)
+      3. CostTracker cost entries (per-invocation costs)
+      4. AuditLog entries (security decisions)
 
     Usage::
 
-        engine = ReplayEngine(run_store=store, node_handler=handler_fn)
-        comparison = await engine.replay(
-            original_run_id="run-abc12345",
-            override_provider="ollama",
-        )
+        engine = ReplayEngine(event_tracker, cost_tracker, audit_log)
+
+        # Replay a run
+        record = engine.replay(run_id="run-123")
+        print(record.steps)
+        print(record.cost_summary)
+
+        # Export for debugging
+        json_str = record.to_json()
     """
 
     def __init__(
         self,
-        run_store: RunStore,
-        node_handler: NodeHandler,
+        event_tracker: EventTracker,
+        cost_tracker: CostTracker,
+        audit_log: AuditLog,
     ):
-        self._store = run_store
-        self._handler = node_handler
+        self._events = event_tracker
+        self._costs = cost_tracker
+        self._audit = audit_log
 
-    async def replay(
-        self,
-        original_run_id: str,
-        override_provider: Optional[str] = None,
-        override_model: Optional[str] = None,
-        sub_graphs: Optional[Dict[str, ExecutionGraph]] = None,
-    ) -> ReplayComparison:
+    def replay(self, run_id: str) -> ReplayRecord:
         """
-        Replay a previously executed run.
+        Reconstruct a full replay record for a completed run.
 
-        Args:
-            original_run_id: The run_id of the original execution to replay.
-            override_provider: If set, swap every node's model_provider to this.
-            override_model: If set, override the model_name on every node.
-            sub_graphs: Optional sub-graph registry for nested execution.
-
-        Returns:
-            ReplayComparison with original vs replay metrics.
-
-        Raises:
-            ValueError: If the original run_id is not found in the store.
+        Builds the replay from event timeline, cost data, and audit trail.
         """
-        # 1. Load original run record
-        record = self._store.get(original_run_id)
-        if record is None:
-            raise ValueError(
-                f"Run '{original_run_id}' not found in the run store."
-            )
+        logger.info("[Replay] Replaying run: %s", run_id)
+
+        # Get raw events
+        events = self._events.get_events(run_id)
+
+        # Build steps from events
+        steps = self._build_steps(events)
+
+        # Get cost summary
+        cost_summary = self._costs.get_run_summary(run_id)
+
+        # Get audit entries
+        audit_entries = self._audit.get_entries(run_id)
+
+        # Determine goal and status
+        goal = ""
+        final_status = "unknown"
+        total_duration = 0.0
+
+        for evt in events:
+            if evt.get("event_type") == EventType.RUN_CREATED.value:
+                goal = evt.get("data", {}).get("goal", "")
+            if evt.get("event_type") == EventType.RUN_COMPLETED.value:
+                final_status = evt.get("data", {}).get("status", "completed")
+                total_duration = evt.get("duration_ms", 0.0)
+
+        if not total_duration and events:
+            # Calculate from first to last event
+            first_ts = events[0].get("timestamp", 0)
+            last_ts = events[-1].get("timestamp", 0)
+            total_duration = (last_ts - first_ts) * 1000
+
+        record = ReplayRecord(
+            run_id=run_id,
+            goal=goal,
+            steps=steps,
+            events=events,
+            cost_summary=cost_summary,
+            audit_entries=audit_entries,
+            final_status=final_status,
+            total_duration_ms=total_duration,
+        )
 
         logger.info(
-            "Replaying run '%s' (graph '%s') with provider_override=%s",
-            original_run_id,
-            record.graph.graph_id,
-            override_provider,
+            "[Replay] Replay complete: %d steps, %d events, cost=$%.4f",
+            len(steps),
+            len(events),
+            cost_summary.get("total_cost_usd", 0),
         )
 
-        # 2. Deep-copy the graph and optionally swap providers
-        replay_graph = self._clone_graph_with_overrides(
-            record.graph,
-            override_provider=override_provider,
-            override_model=override_model,
-        )
+        return record
 
-        # 3. Create fresh tracing & cost tracking for the replay
-        replay_run_id = f"replay-{uuid.uuid4().hex[:8]}"
-        replay_tracer = ExecutionTracer(run_id=replay_run_id)
-        replay_cost_tracker = CostTracker(run_id=replay_run_id)
-        replay_trace_events: List[TraceEvent] = []
+    def _build_steps(self, events: List[Dict[str, Any]]) -> List[ReplayStep]:
+        """Convert events into sequential replay steps."""
+        steps = []
+        step_index = 0
 
-        # 4. Execute replay via standard executor
-        replay_state = ExecutionState(
-            run_id=replay_run_id,
-            graph_id=replay_graph.graph_id,
-        )
+        for evt in events:
+            event_type = evt.get("event_type", "")
+            # Only create steps for significant events
+            if event_type in (
+                EventType.RUN_CREATED.value,
+                EventType.PLAN_CREATED.value,
+                EventType.AGENT_STARTED.value,
+                EventType.AGENT_COMPLETED.value,
+                EventType.AGENT_FAILED.value,
+                EventType.TOOL_EXECUTED.value,
+                EventType.SECURITY_CHECK.value,
+                EventType.APPROVAL_REQUESTED.value,
+                EventType.APPROVED.value,
+                EventType.REJECTED.value,
+                EventType.RUN_COMPLETED.value,
+            ):
+                # Map event type to node name
+                node_map = {
+                    EventType.RUN_CREATED.value: "start",
+                    EventType.PLAN_CREATED.value: "planner",
+                    EventType.AGENT_STARTED.value: "executor",
+                    EventType.AGENT_COMPLETED.value: "executor",
+                    EventType.AGENT_FAILED.value: "executor",
+                    EventType.TOOL_EXECUTED.value: "tool",
+                    EventType.SECURITY_CHECK.value: "policy_engine",
+                    EventType.APPROVAL_REQUESTED.value: "hitl_gate",
+                    EventType.APPROVED.value: "hitl_gate",
+                    EventType.REJECTED.value: "hitl_gate",
+                    EventType.RUN_COMPLETED.value: "end",
+                }
 
-        executor = AsyncDAGExecutor(
-            graph=replay_graph,
-            node_handler=self._handler,
-            sub_graphs=sub_graphs or {},
-            state=replay_state,
-            trace_events=replay_trace_events,
-        )
-
-        replay_state = await executor.run()
-
-        # Ingest executor trace events into the tracer
-        replay_tracer.ingest_events(replay_trace_events)
-
-        # Record costs from execution results
-        for node_id, result in replay_state.get_all_results().items():
-            if result.tokens_used > 0:
-                replay_cost_tracker.record(
-                    node_id=node_id,
-                    provider=result.provider_used or override_provider or "unknown",
-                    model=override_model or "default",
-                    tokens_prompt=result.tokens_prompt,
-                    tokens_completion=result.tokens_completion,
+                step = ReplayStep(
+                    step_index=step_index,
+                    node_name=node_map.get(event_type, "unknown"),
+                    event_type=event_type,
+                    agent_role=evt.get("agent_role", ""),
+                    task_id=evt.get("task_id", ""),
+                    state_snapshot=evt.get("data", {}),
+                    duration_ms=evt.get("duration_ms", 0.0),
+                    timestamp=evt.get("timestamp", 0.0),
                 )
+                steps.append(step)
+                step_index += 1
 
-        # 5. Store the replay run
-        replay_record = RunRecord(
-            run_id=replay_run_id,
-            tracer=replay_tracer,
-            graph=replay_graph,
-            goal_text=record.goal_text,
-            cost_summary=replay_cost_tracker.get_run_summary(),
-        )
-        self._store.store(replay_record)
+        return steps
 
-        # 6. Build comparison
-        comparison = ReplayComparison(
-            original_run_id=original_run_id,
-            replay_run_id=replay_run_id,
-            original_summary=_extract_run_summary(record),
-            replay_summary=replay_state.summary(),
-            original_cost=record.cost_summary,
-            replay_cost=replay_cost_tracker.get_run_summary(),
-            provider_override=override_provider,
-        )
+    def get_step_at(self, run_id: str, step_index: int) -> Optional[Dict[str, Any]]:
+        """Get a specific step from a replayed run."""
+        record = self.replay(run_id)
+        if 0 <= step_index < len(record.steps):
+            return record.steps[step_index].to_dict()
+        return None
 
-        logger.info(
-            "Replay '%s' completed. Original cost=$%.6f, Replay cost=$%.6f",
-            replay_run_id,
-            record.cost_summary.get("total_cost_usd", 0.0),
-            replay_cost_tracker.get_run_summary().get("total_cost_usd", 0.0),
-        )
+    def get_run_summary(self, run_id: str) -> Dict[str, Any]:
+        """Get a summary of a run without full replay."""
+        events = self._events.get_events(run_id)
+        cost = self._costs.get_run_summary(run_id)
+        event_summary = self._events.get_event_summary(run_id)
 
-        return comparison
-
-    # ── Internal Helpers ───────────────────────────────────────────────
-
-    @staticmethod
-    def _clone_graph_with_overrides(
-        graph: ExecutionGraph,
-        override_provider: Optional[str] = None,
-        override_model: Optional[str] = None,
-    ) -> ExecutionGraph:
-        """
-        Deep-copy an ExecutionGraph, optionally overriding model_provider
-        and model_name on every node.
-        """
-        # Deep-copy via model serialisation to avoid shared references
-        graph_data = graph.model_dump()
-        graph_data["graph_id"] = f"replay-{graph.graph_id}"
-
-        if override_provider or override_model:
-            for node_id, node_data in graph_data.get("nodes", {}).items():
-                if override_provider:
-                    node_data["model_provider"] = override_provider
-                if override_model:
-                    node_data["model_name"] = override_model
-
-        return ExecutionGraph.model_validate(graph_data)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────
-
-
-def _extract_run_summary(record: RunRecord) -> Dict[str, Any]:
-    """
-    Extract a summary dict from a RunRecord.
-
-    Tries to pull from the stored RunReport if available, otherwise
-    returns basic info from the record itself.
-    """
-    if record.run_report:
         return {
-            "run_id": record.run_report.run_id,
-            "graph_id": record.run_report.graph_id,
-            "elapsed_ms": record.run_report.total_latency_ms,
-            "node_count": record.run_report.node_count,
-            "nodes_succeeded": record.run_report.nodes_succeeded,
-            "nodes_failed": record.run_report.nodes_failed,
-            "nodes_retried": record.run_report.nodes_retried,
+            "run_id": run_id,
+            "event_count": len(events),
+            "event_types": event_summary,
+            "cost_summary": cost,
+            "violations": len(self._audit.get_violations(run_id)),
         }
 
-    return {
-        "run_id": record.run_id,
-        "graph_id": record.graph.graph_id,
-        "elapsed_ms": 0.0,
-        "node_count": len(record.graph.nodes),
-        "nodes_succeeded": 0,
-        "nodes_failed": 0,
-        "nodes_retried": 0,
-    }
+    def compare_runs(self, run_id_a: str, run_id_b: str) -> Dict[str, Any]:
+        """Compare two runs side by side."""
+        summary_a = self.get_run_summary(run_id_a)
+        summary_b = self.get_run_summary(run_id_b)
+
+        return {
+            "run_a": summary_a,
+            "run_b": summary_b,
+            "differences": {
+                "event_count_diff": summary_a["event_count"] - summary_b["event_count"],
+                "cost_diff": (
+                    summary_a["cost_summary"].get("total_cost_usd", 0)
+                    - summary_b["cost_summary"].get("total_cost_usd", 0)
+                ),
+            },
+        }

@@ -1,267 +1,309 @@
 """
-AE-03 Token & Cost Tracker — Per-Node and Per-Run Aggregation.
+AE-03 Structured Event Tracker (Directive V2).
 
-Provides:
-  - PROVIDER_PRICING: canonical pricing table (USD per 1M tokens)
-  - CostEntry: immutable record of a single LLM call's cost
-  - CostTracker: accumulates token usage and USD cost across an
-    entire execution run, with per-node and per-provider breakdown
+Emits typed, structured events for every significant operation in the
+execution pipeline. Events form the backbone of the observability system.
+
+Event Types (23 total):
+  RUN_CREATED, PLAN_CREATED, GRAPH_COMPILED, SECURITY_CHECK,
+  TOOL_REQUESTED, TOOL_ALLOWED, TOOL_DENIED, TOOL_EXECUTED,
+  AGENT_STARTED, AGENT_COMPLETED, AGENT_FAILED, RETRY, REPLAN,
+  RAG_SEARCH, SOURCE_RETRIEVED, CRITIC_STARTED, CRITIC_COMPLETED,
+  CRITIC_FAILED, VERIFICATION_STARTED, VERIFICATION_COMPLETED,
+  APPROVAL_REQUESTED, APPROVED, REJECTED, REPORT_CREATED, RUN_COMPLETED
+
+All events are immutable and append-only — they form the audit trail.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import threading
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+import time
+import uuid
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ── Provider Pricing Table (USD per 1M tokens) ────────────────────────
-# Canonical source of truth — also referenced by providers/router.py.
-
-PROVIDER_PRICING: Dict[str, Dict[str, Tuple[float, float]]] = {
-    # provider: { model: (input_cost_per_1M, output_cost_per_1M) }
-    "openai": {
-        "gpt-4o": (2.50, 10.00),
-        "gpt-4o-mini": (0.15, 0.60),
-    },
-    "gemini": {
-        "gemini-1.5-pro": (1.25, 5.00),
-    },
-    "ollama": {
-        # Local inference — zero cost
-        "_default": (0.0, 0.0),
-    },
-}
+# ── Event Types ──────────────────────────────────────────────────────
 
 
-def calculate_cost(
-    provider: str,
-    model: str,
-    tokens_prompt: int,
-    tokens_completion: int,
-) -> float:
+class EventType(str, Enum):
+    """All structured event types emitted during execution."""
+    RUN_CREATED = "RUN_CREATED"
+    PLAN_CREATED = "PLAN_CREATED"
+    GRAPH_COMPILED = "GRAPH_COMPILED"
+    SECURITY_CHECK = "SECURITY_CHECK"
+    TOOL_REQUESTED = "TOOL_REQUESTED"
+    TOOL_ALLOWED = "TOOL_ALLOWED"
+    TOOL_DENIED = "TOOL_DENIED"
+    TOOL_EXECUTED = "TOOL_EXECUTED"
+    AGENT_STARTED = "AGENT_STARTED"
+    AGENT_COMPLETED = "AGENT_COMPLETED"
+    AGENT_FAILED = "AGENT_FAILED"
+    RETRY = "RETRY"
+    REPLAN = "REPLAN"
+    RAG_SEARCH = "RAG_SEARCH"
+    SOURCE_RETRIEVED = "SOURCE_RETRIEVED"
+    CRITIC_STARTED = "CRITIC_STARTED"
+    CRITIC_COMPLETED = "CRITIC_COMPLETED"
+    CRITIC_FAILED = "CRITIC_FAILED"
+    VERIFICATION_STARTED = "VERIFICATION_STARTED"
+    VERIFICATION_COMPLETED = "VERIFICATION_COMPLETED"
+    APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REPORT_CREATED = "REPORT_CREATED"
+    RUN_COMPLETED = "RUN_COMPLETED"
+
+
+# ── Event Model ──────────────────────────────────────────────────────
+
+
+class TraceEvent:
     """
-    Calculate USD cost for a single LLM call.
+    An immutable structured event in the execution trace.
 
-    Falls back to ``_default`` pricing within a provider if the exact
-    model is not in the table, and to zero cost if the provider itself
-    is unknown.
-
-    Returns:
-        Estimated cost in USD, rounded to 8 decimal places.
+    Attributes:
+        event_id: Unique event identifier.
+        event_type: One of the 25 EventType values.
+        run_id: Associated execution run.
+        timestamp: Unix timestamp of emission.
+        data: Event-specific payload.
+        agent_role: Agent that produced this event (if applicable).
+        task_id: Task that produced this event (if applicable).
+        duration_ms: Duration of the operation (if applicable).
     """
-    provider_prices = PROVIDER_PRICING.get(provider, {})
-    input_price, output_price = provider_prices.get(
-        model, provider_prices.get("_default", (0.0, 0.0))
+
+    __slots__ = (
+        "event_id", "event_type", "run_id", "timestamp",
+        "data", "agent_role", "task_id", "duration_ms",
     )
-    cost = (tokens_prompt / 1_000_000 * input_price) + (
-        tokens_completion / 1_000_000 * output_price
-    )
-    return round(cost, 8)
 
-
-# ── Cost Entry ─────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class CostEntry:
-    """Immutable record of a single LLM call's token usage and cost."""
-
-    node_id: str
-    provider: str
-    model: str
-    tokens_prompt: int
-    tokens_completion: int
-    total_tokens: int
-    cost_usd: float
+    def __init__(
+        self,
+        event_type: EventType,
+        run_id: str = "",
+        data: Optional[Dict[str, Any]] = None,
+        agent_role: str = "",
+        task_id: str = "",
+        duration_ms: float = 0.0,
+    ):
+        self.event_id = f"evt-{uuid.uuid4().hex[:8]}"
+        self.event_type = event_type
+        self.run_id = run_id
+        self.timestamp = time.time()
+        self.data = data or {}
+        self.agent_role = agent_role
+        self.task_id = task_id
+        self.duration_ms = duration_ms
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
         return {
-            "node_id": self.node_id,
-            "provider": self.provider,
-            "model": self.model,
-            "tokens_prompt": self.tokens_prompt,
-            "tokens_completion": self.tokens_completion,
-            "total_tokens": self.total_tokens,
-            "cost_usd": self.cost_usd,
+            "event_id": self.event_id,
+            "event_type": self.event_type.value,
+            "run_id": self.run_id,
+            "timestamp": self.timestamp,
+            "data": self.data,
+            "agent_role": self.agent_role,
+            "task_id": self.task_id,
+            "duration_ms": round(self.duration_ms, 1),
         }
 
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(self.to_dict(), default=str)
 
-# ── Cost Tracker ───────────────────────────────────────────────────────
+    def __repr__(self) -> str:
+        return (
+            f"TraceEvent({self.event_type.value}, run={self.run_id}, "
+            f"agent={self.agent_role}, task={self.task_id})"
+        )
 
 
-class CostTracker:
+# ── Event Tracker ────────────────────────────────────────────────────
+
+
+class EventTracker:
     """
-    Accumulates token usage and USD cost across an entire execution run.
+    Structured event emitter and collector.
 
-    Thread-safe — designed for concurrent node execution via asyncio.
+    Collects all events for a run in chronological order.
+    Supports event listeners for real-time SSE streaming.
 
     Usage::
 
-        tracker = CostTracker(run_id="run-abc12345")
-        tracker.record(
-            node_id="researcher-1",
-            provider="openai",
-            model="gpt-4o",
-            tokens_prompt=450,
-            tokens_completion=120,
-        )
-        report = tracker.get_run_summary()
+        tracker = EventTracker()
+
+        # Emit events
+        tracker.emit(EventType.RUN_CREATED, run_id="run-123",
+                     data={"goal": "Research AI"})
+        tracker.emit(EventType.AGENT_STARTED, run_id="run-123",
+                     agent_role="researcher", task_id="task-001")
+
+        # Get events
+        events = tracker.get_events("run-123")
+
+        # Register listener for SSE
+        tracker.add_listener(lambda event: send_sse(event))
     """
 
-    def __init__(self, run_id: str = ""):
-        self._run_id = run_id
-        self._entries: List[CostEntry] = []
-        self._lock = threading.Lock()
+    def __init__(self) -> None:
+        self._events: Dict[str, List[TraceEvent]] = {}  # run_id -> events
+        self._global_events: List[TraceEvent] = []
+        self._listeners: List[Callable[[TraceEvent], None]] = []
 
-    @property
-    def run_id(self) -> str:
-        return self._run_id
-
-    # ── Recording ──────────────────────────────────────────────────────
-
-    def record(
+    def emit(
         self,
-        node_id: str,
-        provider: str,
-        model: str,
-        tokens_prompt: int,
-        tokens_completion: int,
-    ) -> CostEntry:
+        event_type: EventType,
+        run_id: str = "",
+        data: Optional[Dict[str, Any]] = None,
+        agent_role: str = "",
+        task_id: str = "",
+        duration_ms: float = 0.0,
+    ) -> TraceEvent:
         """
-        Record a single LLM call's token usage.
+        Emit a structured event.
 
-        Calculates cost from the pricing table and appends the entry.
+        The event is:
+          1. Stored in the run's event list
+          2. Stored in the global event list
+          3. Dispatched to all registered listeners
 
-        Returns:
-            The created CostEntry.
+        Returns the created TraceEvent.
         """
-        cost = calculate_cost(provider, model, tokens_prompt, tokens_completion)
-        total = tokens_prompt + tokens_completion
-
-        entry = CostEntry(
-            node_id=node_id,
-            provider=provider,
-            model=model,
-            tokens_prompt=tokens_prompt,
-            tokens_completion=tokens_completion,
-            total_tokens=total,
-            cost_usd=cost,
+        event = TraceEvent(
+            event_type=event_type,
+            run_id=run_id,
+            data=data,
+            agent_role=agent_role,
+            task_id=task_id,
+            duration_ms=duration_ms,
         )
 
-        with self._lock:
-            self._entries.append(entry)
+        # Store
+        if run_id:
+            self._events.setdefault(run_id, []).append(event)
+        self._global_events.append(event)
 
-        logger.debug(
-            "Cost recorded: node=%s provider=%s model=%s tokens=%d cost=$%.6f",
-            node_id, provider, model, total, cost,
+        # Log
+        logger.info(
+            "[Tracker] %s run=%s agent=%s task=%s",
+            event_type.value,
+            run_id or "-",
+            agent_role or "-",
+            task_id or "-",
         )
-        return entry
 
-    # ── Per-Node Aggregation ───────────────────────────────────────────
+        # Notify listeners
+        for listener in self._listeners:
+            try:
+                listener(event)
+            except Exception as e:
+                logger.warning("Event listener error: %s", e)
 
-    def get_node_summary(self, node_id: str) -> Dict[str, Any]:
-        """Return aggregated token usage and cost for a specific node."""
-        with self._lock:
-            node_entries = [e for e in self._entries if e.node_id == node_id]
+        return event
 
-        if not node_entries:
-            return {
-                "node_id": node_id,
-                "call_count": 0,
-                "tokens_prompt": 0,
-                "tokens_completion": 0,
-                "total_tokens": 0,
-                "total_cost_usd": 0.0,
+    # ── Convenience Emitters ──────────────────────────────────────────
+
+    def emit_run_created(self, run_id: str, goal: str, user_id: str = "") -> TraceEvent:
+        return self.emit(EventType.RUN_CREATED, run_id, {"goal": goal, "user_id": user_id})
+
+    def emit_plan_created(self, run_id: str, task_count: int, template: str = "") -> TraceEvent:
+        return self.emit(EventType.PLAN_CREATED, run_id, {"task_count": task_count, "template": template})
+
+    def emit_agent_started(self, run_id: str, agent_role: str, task_id: str, description: str = "") -> TraceEvent:
+        return self.emit(EventType.AGENT_STARTED, run_id, {"description": description}, agent_role, task_id)
+
+    def emit_agent_completed(self, run_id: str, agent_role: str, task_id: str, duration_ms: float = 0.0, tokens: int = 0) -> TraceEvent:
+        return self.emit(EventType.AGENT_COMPLETED, run_id, {"tokens": tokens}, agent_role, task_id, duration_ms)
+
+    def emit_agent_failed(self, run_id: str, agent_role: str, task_id: str, error: str = "") -> TraceEvent:
+        return self.emit(EventType.AGENT_FAILED, run_id, {"error": error}, agent_role, task_id)
+
+    def emit_tool_requested(self, run_id: str, tool_name: str, agent_role: str = "") -> TraceEvent:
+        return self.emit(EventType.TOOL_REQUESTED, run_id, {"tool_name": tool_name}, agent_role)
+
+    def emit_tool_allowed(self, run_id: str, tool_name: str, agent_role: str = "") -> TraceEvent:
+        return self.emit(EventType.TOOL_ALLOWED, run_id, {"tool_name": tool_name}, agent_role)
+
+    def emit_tool_denied(self, run_id: str, tool_name: str, agent_role: str = "", reason: str = "") -> TraceEvent:
+        return self.emit(EventType.TOOL_DENIED, run_id, {"tool_name": tool_name, "reason": reason}, agent_role)
+
+    def emit_security_check(self, run_id: str, verdict: str, rule: str = "", agent_role: str = "") -> TraceEvent:
+        return self.emit(EventType.SECURITY_CHECK, run_id, {"verdict": verdict, "rule": rule}, agent_role)
+
+    def emit_approval_requested(self, run_id: str, approval_id: str, tool_name: str = "") -> TraceEvent:
+        return self.emit(EventType.APPROVAL_REQUESTED, run_id, {"approval_id": approval_id, "tool_name": tool_name})
+
+    def emit_approved(self, run_id: str, approval_id: str) -> TraceEvent:
+        return self.emit(EventType.APPROVED, run_id, {"approval_id": approval_id})
+
+    def emit_rejected(self, run_id: str, approval_id: str, reason: str = "") -> TraceEvent:
+        return self.emit(EventType.REJECTED, run_id, {"approval_id": approval_id, "reason": reason})
+
+    def emit_run_completed(self, run_id: str, status: str, duration_ms: float = 0.0, total_cost: float = 0.0) -> TraceEvent:
+        return self.emit(EventType.RUN_COMPLETED, run_id, {"status": status, "total_cost_usd": total_cost}, duration_ms=duration_ms)
+
+    # ── Queries ───────────────────────────────────────────────────────
+
+    def get_events(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return all events for a run in chronological order."""
+        return [e.to_dict() for e in self._events.get(run_id, [])]
+
+    def get_events_by_type(self, run_id: str, event_type: EventType) -> List[Dict[str, Any]]:
+        """Return events of a specific type for a run."""
+        return [
+            e.to_dict()
+            for e in self._events.get(run_id, [])
+            if e.event_type == event_type
+        ]
+
+    def get_event_count(self, run_id: str) -> int:
+        """Return total event count for a run."""
+        return len(self._events.get(run_id, []))
+
+    def get_all_run_ids(self) -> List[str]:
+        """Return all run IDs with events."""
+        return list(self._events.keys())
+
+    def get_event_summary(self, run_id: str) -> Dict[str, int]:
+        """Return event type counts for a run."""
+        summary: Dict[str, int] = {}
+        for e in self._events.get(run_id, []):
+            summary[e.event_type.value] = summary.get(e.event_type.value, 0) + 1
+        return summary
+
+    def get_timeline(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return a simplified timeline for UI rendering."""
+        events = self._events.get(run_id, [])
+        if not events:
+            return []
+        start_time = events[0].timestamp
+        return [
+            {
+                "event_type": e.event_type.value,
+                "offset_ms": round((e.timestamp - start_time) * 1000, 1),
+                "agent_role": e.agent_role,
+                "task_id": e.task_id,
+                "duration_ms": e.duration_ms,
             }
+            for e in events
+        ]
 
-        return {
-            "node_id": node_id,
-            "call_count": len(node_entries),
-            "tokens_prompt": sum(e.tokens_prompt for e in node_entries),
-            "tokens_completion": sum(e.tokens_completion for e in node_entries),
-            "total_tokens": sum(e.total_tokens for e in node_entries),
-            "total_cost_usd": round(sum(e.cost_usd for e in node_entries), 8),
-        }
+    # ── Listeners ─────────────────────────────────────────────────────
 
-    # ── Per-Provider Aggregation ───────────────────────────────────────
+    def add_listener(self, callback: Callable[[TraceEvent], None]) -> None:
+        """Register an event listener for real-time notifications."""
+        self._listeners.append(callback)
 
-    def get_provider_breakdown(self) -> List[Dict[str, Any]]:
-        """
-        Return per-provider aggregated cost breakdown.
+    def remove_listener(self, callback: Callable[[TraceEvent], None]) -> None:
+        """Remove an event listener."""
+        self._listeners = [l for l in self._listeners if l is not callback]
 
-        Returns a list of dicts, one per provider+model combination,
-        compatible with the ``ProviderCostBreakdown`` schema.
-        """
-        with self._lock:
-            entries = list(self._entries)
-
-        # Group by (provider, model)
-        groups: Dict[Tuple[str, str], List[CostEntry]] = {}
-        for e in entries:
-            key = (e.provider, e.model)
-            groups.setdefault(key, []).append(e)
-
-        breakdown = []
-        for (provider, model), group in sorted(groups.items()):
-            breakdown.append({
-                "provider": provider,
-                "model": model,
-                "tokens_prompt": sum(e.tokens_prompt for e in group),
-                "tokens_completion": sum(e.tokens_completion for e in group),
-                "total_tokens": sum(e.total_tokens for e in group),
-                "cost_usd": round(sum(e.cost_usd for e in group), 8),
-                "call_count": len(group),
-            })
-
-        return breakdown
-
-    # ── Run-Level Summary ──────────────────────────────────────────────
-
-    def get_run_summary(self) -> Dict[str, Any]:
-        """
-        Return complete run-level summary with aggregate totals and
-        per-provider breakdown.
-
-        Compatible with the ``RunReport`` schema fields.
-        """
-        with self._lock:
-            entries = list(self._entries)
-
-        total_prompt = sum(e.tokens_prompt for e in entries)
-        total_completion = sum(e.tokens_completion for e in entries)
-        total_tokens = sum(e.total_tokens for e in entries)
-        total_cost = round(sum(e.cost_usd for e in entries), 8)
-
-        # Unique nodes that had at least one call
-        unique_nodes = {e.node_id for e in entries}
-
-        return {
-            "run_id": self._run_id,
-            "total_calls": len(entries),
-            "total_tokens_prompt": total_prompt,
-            "total_tokens_completion": total_completion,
-            "total_tokens": total_tokens,
-            "total_cost_usd": total_cost,
-            "nodes_with_llm_calls": len(unique_nodes),
-            "provider_breakdown": self.get_provider_breakdown(),
-        }
-
-    # ── All Entries ────────────────────────────────────────────────────
-
-    def get_all_entries(self) -> List[Dict[str, Any]]:
-        """Return all recorded cost entries as dicts."""
-        with self._lock:
-            return [e.to_dict() for e in self._entries]
-
-    def clear(self) -> None:
-        """Reset all tracked entries."""
-        with self._lock:
-            self._entries.clear()
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._entries)
+    def clear_listeners(self) -> None:
+        """Remove all listeners."""
+        self._listeners.clear()
