@@ -1,0 +1,21 @@
+[build]
+  base = "frontend"
+  publish = "frontend/.next"
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NEXT_PUBLIC_API_BASE_URL = "/api/v2"
+
+# Proxy frontend API requests to live FastAPI production backend
+[[redirects]]
+  from = "/api/v2/*"
+  to = "https://ae03-directive-backend.onrender.com/api/v2/:splat"
+  status = 200
+  force = true
+
+# SPA fallback redirect for client-side routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
