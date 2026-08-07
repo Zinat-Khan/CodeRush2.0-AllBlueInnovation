@@ -26,7 +26,7 @@ import {
   Workflow,
 } from "lucide-react";
 
-/* ── Public Types ──────────────────────────────────────────────────────── */
+/* -- Public Types -------------------------------------------------------- */
 export type NodeStatus =
   | "pending"
   | "running"
@@ -51,7 +51,7 @@ interface GraphCanvasProps {
   selectedNodeId: string | null;
 }
 
-/* ── Status → Color Map ───────────────────────────────────────────────── */
+/* -- Status → Color Map ------------------------------------------------- */
 const STATUS_COLORS: Record<NodeStatus, string> = {
   pending: "var(--status-pending)",
   running: "var(--status-running)",
@@ -70,7 +70,7 @@ const STATUS_BG: Record<NodeStatus, string> = {
   waiting_approval: "rgba(59, 130, 246, 0.12)",
 };
 
-/* ── Role → Icon Map ──────────────────────────────────────────────────── */
+/* -- Role → Icon Map ---------------------------------------------------- */
 const ROLE_ICONS: Record<string, React.ReactNode> = {
   ORCHESTRATOR: <Workflow size={16} />,
   PLANNER: <Brain size={16} />,
@@ -87,7 +87,7 @@ const ROLE_ICONS: Record<string, React.ReactNode> = {
   SUB_GRAPH: <GitBranch size={16} />,
 };
 
-/* ── Custom Agent Node ─────────────────────────────────────────────────── */
+/* -- Custom Agent Node --------------------------------------------------- */
 type AgentNodeData = {
   label: string;
   role: string;
@@ -208,7 +208,7 @@ const nodeTypes: NodeTypes = {
   agentNode: AgentNodeComponent as unknown as NodeTypes[string],
 };
 
-/* ── Graph Canvas Component ────────────────────────────────────────────── */
+/* -- Graph Canvas Component ---------------------------------------------- */
 export default function GraphCanvas({
   nodes: agentNodes,
   edges: agentEdges,
@@ -311,3 +311,4 @@ export default function GraphCanvas({
     </ReactFlow>
   );
 }
+

@@ -10,7 +10,7 @@ import {
   Layers,
 } from "lucide-react";
 
-/* ── Public Types ──────────────────────────────────────────────────────── */
+/* -- Public Types -------------------------------------------------------- */
 export interface Metrics {
   totalTokens: number;
   totalCost: number;
@@ -34,7 +34,7 @@ interface MetricsPanelProps {
   status: string;
 }
 
-/* ── Event type → color ───────────────────────────────────────────────── */
+/* -- Event type → color ------------------------------------------------- */
 const EVENT_COLORS: Record<string, string> = {
   SYSTEM: "var(--text-muted)",
   COMPILE: "var(--accent-violet)",
@@ -48,7 +48,7 @@ const EVENT_COLORS: Record<string, string> = {
   RETRY: "var(--status-retrying)",
 };
 
-/* ── Metrics Panel Component ──────────────────────────────────────────── */
+/* -- Metrics Panel Component -------------------------------------------- */
 export default function MetricsPanel({
   metrics,
   eventLog,
@@ -65,12 +65,45 @@ export default function MetricsPanel({
 
   return (
     <div className="glass-card metrics-panel" id="metrics-panel">
-      {/* ── Metric Grid ──────────────────────────────────────────────── */}
+      {/* -- Metric Grid ------------------------------------------------ */}
       <div className="flex items-center gap-sm" style={{ marginBottom: 12 }}>
         <BarChart3 size={15} style={{ color: "var(--accent-secondary)" }} />
         <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
-          Live Metrics
+          Live Observability & Metrics
         </span>
+      </div>
+
+      {/* -- SVG Normal Line Graph -------------------------------------- */}
+      <div style={{ marginBottom: 14, padding: "10px 12px", background: "#0b0e14", borderRadius: 10, border: "1px solid rgba(255, 255, 255, 0.08)" }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, display: "flex", justifyContent: "space-between" }}>
+          <span>Token & Cost Curve</span>
+          <span style={{ color: "var(--accent-emerald)" }} suppressHydrationWarning>{metrics.totalTokens.toLocaleString("en-US")} tokens</span>
+        </div>
+        <svg width="100%" height="55" viewBox="0 0 300 55" style={{ overflow: "visible" }}>
+          <defs>
+            <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#6366f1" />
+              <stop offset="50%" stopColor="#8b5cf6" />
+              <stop offset="100%" stopColor="#34d399" />
+            </linearGradient>
+            <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="rgba(99, 102, 241, 0.25)" />
+              <stop offset="100%" stopColor="rgba(52, 211, 153, 0.0)" />
+            </linearGradient>
+          </defs>
+          <path
+            d="M 10,48 Q 50,42 90,30 T 170,22 T 250,14 T 290,6"
+            fill="none"
+            stroke="url(#lineGrad)"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+          <path
+            d="M 10,48 Q 50,42 90,30 T 170,22 T 250,14 T 290,6 L 290,52 L 10,52 Z"
+            fill="url(#areaGrad)"
+          />
+          <circle cx="290" cy="6" r="4" fill="#34d399" />
+        </svg>
       </div>
 
       <div className="metric-grid">
@@ -78,8 +111,8 @@ export default function MetricsPanel({
           <div className="metric-label">
             <Hash size={10} style={{ display: "inline", verticalAlign: "middle" }} /> Tokens
           </div>
-          <div className="metric-value tokens">
-            {metrics.totalTokens.toLocaleString()}
+          <div className="metric-value tokens" suppressHydrationWarning>
+            {metrics.totalTokens.toLocaleString("en-US")}
           </div>
         </div>
 
@@ -115,7 +148,7 @@ export default function MetricsPanel({
         </div>
       </div>
 
-      {/* ── Per-Node Latency Bars ────────────────────────────────────── */}
+      {/* -- Per-Node Latency Bars -------------------------------------- */}
       {Object.keys(metrics.nodeLatencies).length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div
@@ -144,7 +177,7 @@ export default function MetricsPanel({
         </div>
       )}
 
-      {/* ── Event Log ────────────────────────────────────────────────── */}
+      {/* -- Event Log -------------------------------------------------- */}
       {eventLog.length > 0 && (
         <div>
           <div
@@ -186,3 +219,4 @@ export default function MetricsPanel({
     </div>
   );
 }
+

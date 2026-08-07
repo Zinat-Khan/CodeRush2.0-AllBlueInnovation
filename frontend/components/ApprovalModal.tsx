@@ -3,7 +3,7 @@
 import { useCallback, useEffect } from "react";
 import { ShieldAlert, Check, X } from "lucide-react";
 
-/* ── Public Types ──────────────────────────────────────────────────────── */
+/* -- Public Types -------------------------------------------------------- */
 export interface ApprovalRequest {
   id: string;
   nodeId: string;
@@ -18,7 +18,7 @@ interface ApprovalModalProps {
   onReject: () => void;
 }
 
-/* ── Approval Modal Component ──────────────────────────────────────────── */
+/* -- Approval Modal Component -------------------------------------------- */
 export default function ApprovalModal({
   request,
   onApprove,
@@ -113,3 +113,4 @@ export default function ApprovalModal({
     </div>
   );
 }
+

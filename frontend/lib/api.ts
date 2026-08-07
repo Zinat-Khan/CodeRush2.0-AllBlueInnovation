@@ -7,7 +7,7 @@
 
 const API_BASE = "/api/v2";
 
-/* ── Types ───────────────────────────────────────────────────────────── */
+/* -- Types ------------------------------------------------------------- */
 
 export interface RunRequest {
   goal: string;
@@ -105,7 +105,7 @@ export interface AgentCapabilities {
   }>;
 }
 
-/* ── API Fetch Helpers ───────────────────────────────────────────────── */
+/* -- API Fetch Helpers ------------------------------------------------- */
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -119,7 +119,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/* ── Endpoints ───────────────────────────────────────────────────────── */
+/* -- Endpoints --------------------------------------------------------- */
 
 /** POST /api/v2/run — Start a new execution run. */
 export async function startRun(request: RunRequest): Promise<RunResponse> {
@@ -189,7 +189,7 @@ export async function getEvents(runId: string): Promise<{
   return apiFetch(`/observability/events/${runId}`);
 }
 
-/* ── SSE Stream ──────────────────────────────────────────────────────── */
+/* -- SSE Stream -------------------------------------------------------- */
 
 export type SSEEventCallback = (event: SSEEvent) => void;
 
@@ -252,7 +252,7 @@ export function connectSSE(
   return () => source.close();
 }
 
-/* ── Event → Node Status Mapping ─────────────────────────────────────── */
+/* -- Event → Node Status Mapping --------------------------------------- */
 
 export function eventToNodeStatus(
   eventType: string,
@@ -272,3 +272,4 @@ export function eventToNodeStatus(
 export function roleToNodeId(role: string): string {
   return role.toLowerCase().replace(/\s+/g, "_");
 }
+
