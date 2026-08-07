@@ -36,8 +36,9 @@ from pydantic import BaseModel, Field
 from backend.config import get_settings
 from backend.graph.agent_state import create_initial_state
 from backend.graph.workflow import WorkflowEngine
-from backend.observability.tracker import EventTracker, EventType, TraceEvent
+from backend.observability.tracker import EventTracker, EventType
 from backend.observability.tracer import AuditLog, CostTracker
+from backend.schemas.artifacts import TraceEvent
 from backend.observability.replay import ReplayEngine
 from backend.safety.hitl_gate import HITLGate
 from backend.safety.policy_engine import PolicyEngine
@@ -148,6 +149,18 @@ async def start_run(request: RunRequest):
     # Emit run created event
     _event_tracker.emit_run_created(run_id, request.goal, request.user_id)
 
+    # Initialize active run entry immediately
+    _active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "goal": request.goal,
+        "tasks": [],
+        "current_task": "initializing",
+        "errors": [],
+        "metrics": {},
+        "updated_at": time.time(),
+    }
+
     # Start execution in background
     engine = _get_workflow_engine()
 
@@ -172,9 +185,12 @@ async def start_run(request: RunRequest):
                 "status": "failed",
                 "errors": [str(e)],
                 "goal": request.goal,
+                "tasks": [],
+                "updated_at": time.time(),
             }
 
     asyncio.create_task(_execute())
+
 
     return RunResponse(
         run_id=run_id,

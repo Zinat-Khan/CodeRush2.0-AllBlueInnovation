@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(
         "AE-03 starting | provider=%s | log_level=%s",
-        settings.default_provider,
+        settings.primary_provider,
         settings.log_level,
     )
 
@@ -94,18 +94,11 @@ def create_app() -> FastAPI:
     )
 
     # ── Routes ─────────────────────────────────────────────────────────
-    # V1 routes (backward compatibility)
-    try:
-        from backend.api.routes import router as api_router
-        from backend.api.sse import router as sse_router
-        application.include_router(api_router, prefix="/api")
-        application.include_router(sse_router, prefix="/api")
-    except Exception as e:
-        logger.warning("V1 routes not loaded (expected during migration): %s", e)
-
     # V2 routes (Directive V2 — LangGraph-based)
     from backend.api.routes_v2 import router as v2_router
+    from backend.api.sse import router as sse_router
     application.include_router(v2_router, prefix="/api")
+    application.include_router(sse_router, prefix="/api")
 
     # ── Health Check ───────────────────────────────────────────────────
     @application.get("/api/health", tags=["system"])
