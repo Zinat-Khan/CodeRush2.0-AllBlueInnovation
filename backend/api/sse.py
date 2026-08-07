@@ -34,53 +34,15 @@ async def stream_run_events(run_id: str):
     """
     Stream trace events for a run in real-time via SSE.
 
-    If the run is in the RunStore, streams all existing events
-    immediately. If it's a live run, streams events as they arrive.
+    Redirects to the V2 SSE stream endpoint.
+    For live streaming, use GET /api/v2/run/{run_id}/stream instead.
     """
-    from backend.api.routes import get_run_store
-
-    store = get_run_store()
-    record = store.get(run_id)
-
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
-
-    async def event_generator() -> AsyncGenerator[Dict[str, str], None]:
-        """Yield SSE events from the stored trace."""
-        events = record.tracer.get_all_events()
-
-        for i, event in enumerate(events):
-            yield {
-                "event": event.event_type.value,
-                "id": event.event_id,
-                "data": json.dumps({
-                    "event_type": event.event_type.value,
-                    "run_id": event.run_id,
-                    "node_id": event.node_id,
-                    "timestamp": event.timestamp,
-                    "data": event.data,
-                    "sequence": i,
-                }, default=str),
-            }
-            # Small delay to simulate real-time streaming for replays
-            await asyncio.sleep(0.05)
-
-        # Send completion marker
-        yield {
-            "event": "stream_end",
-            "id": f"end-{run_id}",
-            "data": json.dumps({
-                "run_id": run_id,
-                "total_events": len(events),
-                "status": "complete",
-            }),
-        }
-
-    return EventSourceResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        ping=15,
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(
+        url=f"/api/v2/run/{run_id}/stream",
+        status_code=307,
     )
+
 
 
 # ── SSE: Demo Stream ──────────────────────────────────────────────────

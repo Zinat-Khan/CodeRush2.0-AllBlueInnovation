@@ -44,6 +44,8 @@ class PermissionResult(BaseModel):
     rule_matched: Optional[str] = None
     agent_role: Optional[str] = None
     tool_name: Optional[str] = None
+    # V1 compat
+    agent_id: Optional[str] = None
 
 
 class SafetyResult(BaseModel):
@@ -53,6 +55,10 @@ class SafetyResult(BaseModel):
     threats: List[Dict[str, Any]] = Field(default_factory=list)
     summary: str = ""
     severity: ThreatSeverity = ThreatSeverity.LOW
+    # V1 compat fields
+    threat_type: Optional[str] = None
+    matched_pattern: Optional[str] = None
+    details: Optional[str] = None
 
 
 # ── Policy Rule ────────────────────────────────────────────────────────
@@ -73,6 +79,7 @@ class PolicyRule(BaseModel):
         default="deny",
         description="Action when rule matches: 'allow', 'deny', 'require_approval'.",
     )
+    # V2 fields
     applies_to_roles: List[str] = Field(
         default_factory=list,
         description="Agent roles this rule applies to (empty = all).",
@@ -85,9 +92,26 @@ class PolicyRule(BaseModel):
         default_factory=dict,
         description="Additional conditions for the rule.",
     )
+    # V1 compat fields
+    target_roles: List[AgentRole] = Field(
+        default_factory=list,
+        description="Agent roles this rule targets.",
+    )
+    allowed_tools: List[str] = Field(
+        default_factory=list,
+        description="Tools explicitly allowed by this rule.",
+    )
+    denied_tools: List[str] = Field(
+        default_factory=list,
+        description="Tools explicitly denied by this rule.",
+    )
+    blocked_patterns: List[str] = Field(
+        default_factory=list,
+        description="Regex patterns to block in content.",
+    )
     priority: int = Field(
-        default=100,
-        description="Priority (lower = evaluated first).",
+        default=0,
+        description="Priority (higher = evaluated first).",
     )
     enabled: bool = Field(default=True)
 
@@ -97,6 +121,7 @@ class PolicyRule(BaseModel):
 DENIED_TOOLS: frozenset = frozenset({
     "os_exec",
     "shell_command",
+    "shell_exec",
     "rm_rf",
     "format_disk",
     "delete_database",
@@ -105,6 +130,10 @@ DENIED_TOOLS: frozenset = frozenset({
     "transfer_funds",
     "modify_credentials",
     "escalate_privileges",
+    "privilege_escalate",
+    "terminal_exec",
+    "file_delete",
+    "system_shutdown",
 })
 """
 Hard-coded blocklist of system-critical tools.  No agent, regardless of
@@ -117,19 +146,24 @@ role or configuration, may invoke any tool in this set.
 DEFAULT_ROLE_PERMISSIONS: Dict[AgentRole, frozenset] = {
     AgentRole.ORCHESTRATOR: frozenset({
         "similarity_search",
+        "task_dispatch",
     }),
     AgentRole.PLANNER: frozenset({
         "calculate_metric",
+        "task_planning",
     }),
     AgentRole.RESEARCHER: frozenset({
         "public_search",
+        "web_search",
         "retrieve_public_document",
         "similarity_search",
         "analyze_dataset",
         "calculate_metric",
+        "read_file",
     }),
     AgentRole.RAG: frozenset({
         "similarity_search",
+        "read_file",
     }),
     AgentRole.TOOL_EXECUTION: frozenset({
         "similarity_search",
@@ -138,6 +172,7 @@ DEFAULT_ROLE_PERMISSIONS: Dict[AgentRole, frozenset] = {
         "generate_visualization",
         "calculate_metric",
         "public_search",
+        "code_execute",
     }),
     AgentRole.ANALYST: frozenset({
         "similarity_search",
@@ -146,13 +181,38 @@ DEFAULT_ROLE_PERMISSIONS: Dict[AgentRole, frozenset] = {
         "retrieve_public_document",
         "generate_visualization",
         "public_search",
+        "data_analysis",
     }),
-    AgentRole.CRITIC: frozenset(),
-    AgentRole.VERIFIER: frozenset(),
-    AgentRole.SECURITY: frozenset(),
-    AgentRole.REPORTER: frozenset(),
+    AgentRole.CRITIC: frozenset({
+        "validate_output",
+    }),
+    AgentRole.VERIFIER: frozenset({
+        "validate_output",
+        "schema_check",
+    }),
+    AgentRole.SECURITY: frozenset({
+        "policy_evaluation",
+        "audit",
+    }),
+    AgentRole.REPORTER: frozenset({
+        "generate_report",
+        "read_file",
+    }),
     AgentRole.VISUALIZATION: frozenset({
         "generate_visualization",
+    }),
+    # V1 backward-compat roles
+    AgentRole.EXECUTOR: frozenset({
+        "code_execute",
+        "similarity_search",
+        "analyze_dataset",
+        "retrieve_public_document",
+        "generate_visualization",
+        "calculate_metric",
+        "public_search",
+    }),
+    AgentRole.SUB_GRAPH: frozenset({
+        "task_dispatch",
     }),
 }
 """

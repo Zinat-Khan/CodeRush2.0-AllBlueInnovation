@@ -17,7 +17,7 @@ from enum import Enum
 from time import time
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Enumerations ──────────────────────────────────────────────────────
@@ -36,6 +36,9 @@ class AgentRole(str, Enum):
     SECURITY = "security"
     REPORTER = "reporter"
     VISUALIZATION = "visualization"
+    # V1 backward-compatibility aliases
+    EXECUTOR = "executor"
+    SUB_GRAPH = "sub_graph"
 
 
 class TaskStatus(str, Enum):
@@ -80,6 +83,16 @@ class RunStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ExecutionStatus(str, Enum):
+    """V1 backward-compat: Node-level execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    COMPENSATING = "compensating"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
 
 
 class DifficultyTier(str, Enum):
@@ -136,6 +149,22 @@ class AgentConfig(BaseModel):
     max_retries: int = Field(default=2, description="Max retry attempts on failure.")
     timeout_seconds: int = Field(default=120, description="Per-node execution timeout.")
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    # V1 backward-compat fields
+    sub_graph_id: Optional[str] = Field(default=None, description="Sub-graph reference ID for SUB_GRAPH role.")
+    token_budget: int = Field(default=4096, ge=0, description="Token budget for the agent.")
+
+    @model_validator(mode="after")
+    def _validate_sub_graph(self) -> "AgentConfig":
+        """Enforce sub_graph_id constraints."""
+        if self.role == AgentRole.SUB_GRAPH and not self.sub_graph_id:
+            raise ValueError(
+                "AgentConfig with role=SUB_GRAPH must specify a sub_graph_id."
+            )
+        if self.role != AgentRole.SUB_GRAPH and self.sub_graph_id:
+            raise ValueError(
+                f"AgentConfig with role={self.role.value} must not have a sub_graph_id."
+            )
+        return self
 
 
 # ── Task & Task Graph ────────────────────────────────────────────────
@@ -202,11 +231,15 @@ class AgentMessage(BaseModel):
     message_id: str = Field(
         default_factory=lambda: f"msg-{uuid.uuid4().hex[:8]}",
     )
-    sender: AgentRole = Field(description="Sending agent role.")
-    receiver: AgentRole = Field(description="Receiving agent role.")
+    sender: Optional[AgentRole] = Field(default=None, description="Sending agent role.")
+    receiver: Optional[AgentRole] = Field(default=None, description="Receiving agent role.")
     content: str = Field(default="", description="Message text content.")
     payload: Dict[str, Any] = Field(default_factory=dict, description="Structured data.")
     timestamp: float = Field(default_factory=time)
+    # V1 backward-compat fields
+    sender_agent_id: str = Field(default="", description="V1: Sender agent ID.")
+    target_agent_id: str = Field(default="", description="V1: Target agent ID.")
+    provenance_trace_id: str = Field(default="", description="V1: Provenance trace ID.")
 
 
 # ── Artifacts ────────────────────────────────────────────────────────
@@ -430,6 +463,74 @@ class BenchmarkTask(BaseModel):
         description="JSON Schema for expected output validation.",
     )
     sha256_hash: str = Field(default="", description="Integrity hash of source data.")
+
+
+# ── V1 Backward-Compat: ExecutionResult ──────────────────────────────
+
+
+class ExecutionResult(BaseModel):
+    """V1 backward-compat: Result of executing a single node."""
+    node_id: str = Field(description="ID of the node that was executed.")
+    status: ExecutionStatus = Field(description="Outcome status.")
+    output: Dict[str, Any] = Field(default_factory=dict, description="Node output data.")
+    error: Optional[str] = Field(default=None, description="Error message if failed.")
+    tokens_used: int = Field(default=0, ge=0)
+    tokens_prompt: int = Field(default=0, ge=0)
+    tokens_completion: int = Field(default=0, ge=0)
+    latency_ms: float = Field(default=0.0, ge=0.0)
+    cost_usd: float = Field(default=0.0, ge=0.0)
+    provider_used: str = Field(default="")
+    timestamp: float = Field(default_factory=time)
+
+
+# ── V1 Backward-Compat: ExecutionGraph ───────────────────────────────
+
+
+class ExecutionGraph(BaseModel):
+    """V1 backward-compat: A directed acyclic graph of agent nodes."""
+    graph_id: str = Field(
+        default_factory=lambda: f"graph-{uuid.uuid4().hex[:8]}",
+        description="Unique graph identifier.",
+    )
+    nodes: Dict[str, AgentConfig] = Field(
+        default_factory=dict,
+        description="Map of node_id → AgentConfig.",
+    )
+    edges: List[Any] = Field(
+        default_factory=list,
+        description="List of (source, target) edge tuples.",
+    )
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    version: str = Field(default="1.0.0")
+    locked: bool = Field(default=False)
+    parent_graph_id: Optional[str] = Field(default=None, description="Parent graph for sub-graphs.")
+    created_at: float = Field(default_factory=time)
+
+    def get_node_ids(self) -> List[str]:
+        """Return all node IDs."""
+        return list(self.nodes.keys())
+
+    def get_root_nodes(self) -> List[str]:
+        """Return node IDs with no incoming edges."""
+        targets = {e[1] for e in self.edges}
+        return [nid for nid in self.nodes if nid not in targets]
+
+    def get_leaf_nodes(self) -> List[str]:
+        """Return node IDs with no outgoing edges."""
+        sources = {e[0] for e in self.edges}
+        return [nid for nid in self.nodes if nid not in sources]
+
+    def get_successors(self, node_id: str) -> List[str]:
+        """Return node IDs that this node points to."""
+        return [e[1] for e in self.edges if e[0] == node_id]
+
+    def get_predecessors(self, node_id: str) -> List[str]:
+        """Return node IDs that point to this node."""
+        return [e[0] for e in self.edges if e[1] == node_id]
+
+    def lock(self) -> None:
+        """Lock the graph to prevent further modifications."""
+        self.locked = True
 
 
 # ── Forward reference resolution ─────────────────────────────────────
