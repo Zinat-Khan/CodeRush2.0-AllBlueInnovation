@@ -1,309 +1,336 @@
 """
-AE-03 Structured Event Tracker (Directive V2).
+AE-03 Cost Tracker & Event Tracker — Observability Module.
 
-Emits typed, structured events for every significant operation in the
-execution pipeline. Events form the backbone of the observability system.
-
-Event Types (23 total):
-  RUN_CREATED, PLAN_CREATED, GRAPH_COMPILED, SECURITY_CHECK,
-  TOOL_REQUESTED, TOOL_ALLOWED, TOOL_DENIED, TOOL_EXECUTED,
-  AGENT_STARTED, AGENT_COMPLETED, AGENT_FAILED, RETRY, REPLAN,
-  RAG_SEARCH, SOURCE_RETRIEVED, CRITIC_STARTED, CRITIC_COMPLETED,
-  CRITIC_FAILED, VERIFICATION_STARTED, VERIFICATION_COMPLETED,
-  APPROVAL_REQUESTED, APPROVED, REJECTED, REPORT_CREATED, RUN_COMPLETED
-
-All events are immutable and append-only — they form the audit trail.
+Provides:
+  - PROVIDER_PRICING: Per-provider, per-model token pricing table.
+  - calculate_cost(): Compute USD cost from token counts.
+  - CostTracker: Per-run token & cost aggregation with V1-compat API.
+  - EventTracker: Run-scoped event recording (V2 infrastructure).
+  - EventType: Event type enum for the tracker.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ── Event Types ──────────────────────────────────────────────────────
+# ── Provider Pricing Table ────────────────────────────────────────────
+
+PROVIDER_PRICING: Dict[str, Dict[str, Dict[str, float]]] = {
+    "openai": {
+        "gpt-4o": {"input": 2.50, "output": 10.00},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+        "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+    },
+    "gemini": {
+        "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+        "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+    },
+    "google": {
+        "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+        "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+    },
+    "ollama": {},  # Local — always free
+}
+"""
+Pricing per 1M tokens.  Keys: provider → model → {input, output}.
+Ollama models are free (local inference).
+"""
 
 
-class EventType(str, Enum):
-    """All structured event types emitted during execution."""
-    RUN_CREATED = "RUN_CREATED"
-    PLAN_CREATED = "PLAN_CREATED"
-    GRAPH_COMPILED = "GRAPH_COMPILED"
-    SECURITY_CHECK = "SECURITY_CHECK"
-    TOOL_REQUESTED = "TOOL_REQUESTED"
-    TOOL_ALLOWED = "TOOL_ALLOWED"
-    TOOL_DENIED = "TOOL_DENIED"
-    TOOL_EXECUTED = "TOOL_EXECUTED"
-    AGENT_STARTED = "AGENT_STARTED"
-    AGENT_COMPLETED = "AGENT_COMPLETED"
-    AGENT_FAILED = "AGENT_FAILED"
-    RETRY = "RETRY"
-    REPLAN = "REPLAN"
-    RAG_SEARCH = "RAG_SEARCH"
-    SOURCE_RETRIEVED = "SOURCE_RETRIEVED"
-    CRITIC_STARTED = "CRITIC_STARTED"
-    CRITIC_COMPLETED = "CRITIC_COMPLETED"
-    CRITIC_FAILED = "CRITIC_FAILED"
-    VERIFICATION_STARTED = "VERIFICATION_STARTED"
-    VERIFICATION_COMPLETED = "VERIFICATION_COMPLETED"
-    APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    REPORT_CREATED = "REPORT_CREATED"
-    RUN_COMPLETED = "RUN_COMPLETED"
+# ── calculate_cost ────────────────────────────────────────────────────
 
 
-# ── Event Model ──────────────────────────────────────────────────────
-
-
-class TraceEvent:
+def calculate_cost(
+    provider: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
     """
-    An immutable structured event in the execution trace.
+    Calculate USD cost for a single LLM invocation.
 
-    Attributes:
-        event_id: Unique event identifier.
-        event_type: One of the 25 EventType values.
-        run_id: Associated execution run.
-        timestamp: Unix timestamp of emission.
-        data: Event-specific payload.
-        agent_role: Agent that produced this event (if applicable).
-        task_id: Task that produced this event (if applicable).
-        duration_ms: Duration of the operation (if applicable).
+    Args:
+        provider: Provider name (openai, gemini, ollama, etc.).
+        model: Model name (gpt-4o, gemini-1.5-pro, etc.).
+        prompt_tokens: Number of input/prompt tokens.
+        completion_tokens: Number of output/completion tokens.
+
+    Returns:
+        Cost in USD, rounded to 6 decimal places.
     """
+    provider_models = PROVIDER_PRICING.get(provider, {})
+    if not provider_models:
+        return 0.0
+
+    model_pricing = provider_models.get(model, {})
+    if not model_pricing:
+        return 0.0
+
+    input_cost = (prompt_tokens / 1_000_000) * model_pricing.get("input", 0.0)
+    output_cost = (completion_tokens / 1_000_000) * model_pricing.get("output", 0.0)
+    return round(input_cost + output_cost, 6)
+
+
+# ── CostTracker (V1-compat API) ──────────────────────────────────────
+
+
+class _CostEntry:
+    """A single cost record."""
 
     __slots__ = (
-        "event_id", "event_type", "run_id", "timestamp",
-        "data", "agent_role", "task_id", "duration_ms",
+        "node_id", "provider", "model",
+        "prompt_tokens", "completion_tokens", "total_tokens",
+        "cost_usd", "timestamp",
     )
 
     def __init__(
         self,
-        event_type: EventType,
-        run_id: str = "",
-        data: Optional[Dict[str, Any]] = None,
-        agent_role: str = "",
-        task_id: str = "",
-        duration_ms: float = 0.0,
+        node_id: str,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
     ):
-        self.event_id = f"evt-{uuid.uuid4().hex[:8]}"
-        self.event_type = event_type
-        self.run_id = run_id
+        self.node_id = node_id
+        self.provider = provider
+        self.model = model
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = prompt_tokens + completion_tokens
+        self.cost_usd = calculate_cost(provider, model, prompt_tokens, completion_tokens)
         self.timestamp = time.time()
-        self.data = data or {}
-        self.agent_role = agent_role
-        self.task_id = task_id
-        self.duration_ms = duration_ms
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize to dictionary."""
-        return {
-            "event_id": self.event_id,
-            "event_type": self.event_type.value,
-            "run_id": self.run_id,
-            "timestamp": self.timestamp,
-            "data": self.data,
-            "agent_role": self.agent_role,
-            "task_id": self.task_id,
-            "duration_ms": round(self.duration_ms, 1),
-        }
 
-    def to_json(self) -> str:
-        """Serialize to JSON string."""
-        return json.dumps(self.to_dict(), default=str)
+class CostTracker:
+    """
+    Per-run token & cost aggregation.
 
-    def __repr__(self) -> str:
-        return (
-            f"TraceEvent({self.event_type.value}, run={self.run_id}, "
-            f"agent={self.agent_role}, task={self.task_id})"
+    V1-compat API used by routes.py and test_module7::
+
+        tracker = CostTracker("run-id")
+        tracker.record("researcher", "openai", "gpt-4o", 800, 300)
+        summary = tracker.get_run_summary()
+    """
+
+    def __init__(self, run_id: str = ""):
+        self._run_id = run_id
+        self._entries: List[_CostEntry] = []
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def record(
+        self,
+        node_id: str,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        """Record a single LLM invocation cost."""
+        entry = _CostEntry(node_id, provider, model, prompt_tokens, completion_tokens)
+        self._entries.append(entry)
+        logger.debug(
+            "CostTracker: node=%s provider=%s model=%s tokens=%d cost=$%.6f",
+            node_id, provider, model, entry.total_tokens, entry.cost_usd,
         )
 
+    def get_provider_breakdown(self) -> List[Dict[str, Any]]:
+        """
+        Get per-provider/model cost breakdown.
 
-# ── Event Tracker ────────────────────────────────────────────────────
+        Returns list of dicts with: provider, model, call_count, total_tokens, cost_usd.
+        """
+        groups: Dict[str, Dict[str, Any]] = {}
+        for e in self._entries:
+            key = f"{e.provider}/{e.model}"
+            if key not in groups:
+                groups[key] = {
+                    "provider": e.provider,
+                    "model": e.model,
+                    "call_count": 0,
+                    "total_tokens": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost_usd": 0.0,
+                }
+            groups[key]["call_count"] += 1
+            groups[key]["total_tokens"] += e.total_tokens
+            groups[key]["prompt_tokens"] += e.prompt_tokens
+            groups[key]["completion_tokens"] += e.completion_tokens
+            groups[key]["cost_usd"] = round(groups[key]["cost_usd"] + e.cost_usd, 6)
+
+        return list(groups.values())
+
+    def get_node_summary(self, node_id: str) -> Dict[str, Any]:
+        """Get cost summary for a specific node."""
+        entries = [e for e in self._entries if e.node_id == node_id]
+        if not entries:
+            return {
+                "node_id": node_id,
+                "call_count": 0,
+                "total_tokens": 0,
+                "total_cost_usd": 0.0,
+            }
+        return {
+            "node_id": node_id,
+            "call_count": len(entries),
+            "total_tokens": sum(e.total_tokens for e in entries),
+            "prompt_tokens": sum(e.prompt_tokens for e in entries),
+            "completion_tokens": sum(e.completion_tokens for e in entries),
+            "total_cost_usd": round(sum(e.cost_usd for e in entries), 6),
+        }
+
+    def get_run_summary(self) -> Dict[str, Any]:
+        """Get cost summary for the entire run."""
+        total_tokens = sum(e.total_tokens for e in self._entries)
+        total_cost = sum(e.cost_usd for e in self._entries)
+        unique_nodes = {e.node_id for e in self._entries}
+        return {
+            "run_id": self._run_id,
+            "total_calls": len(self._entries),
+            "total_tokens": total_tokens,
+            "total_prompt_tokens": sum(e.prompt_tokens for e in self._entries),
+            "total_completion_tokens": sum(e.completion_tokens for e in self._entries),
+            "total_cost_usd": round(total_cost, 6),
+            "nodes_with_llm_calls": len(unique_nodes),
+            "provider_breakdown": self.get_provider_breakdown(),
+        }
+
+
+# ── Event Type Enum ───────────────────────────────────────────────────
+
+
+class EventType(str, Enum):
+    """Event types for the EventTracker."""
+    RUN_CREATED = "run_created"
+    PLAN_CREATED = "plan_created"
+    GRAPH_COMPILED = "graph_compiled"
+    SECURITY_CHECK = "security_check"
+    TOOL_REQUESTED = "tool_requested"
+    TOOL_ALLOWED = "tool_allowed"
+    TOOL_DENIED = "tool_denied"
+    TOOL_EXECUTED = "tool_executed"
+    AGENT_STARTED = "agent_started"
+    AGENT_COMPLETED = "agent_completed"
+    AGENT_FAILED = "agent_failed"
+    RETRY = "retry"
+    REPLAN = "replan"
+    RAG_SEARCH = "rag_search"
+    SOURCE_RETRIEVED = "source_retrieved"
+    CRITIC_STARTED = "critic_started"
+    CRITIC_COMPLETED = "critic_completed"
+    CRITIC_FAILED = "critic_failed"
+    VERIFICATION_STARTED = "verification_started"
+    VERIFICATION_COMPLETED = "verification_completed"
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REPORT_CREATED = "report_created"
+    RUN_COMPLETED = "run_completed"
+
+
+# ── Event Tracker ─────────────────────────────────────────────────────
 
 
 class EventTracker:
     """
-    Structured event emitter and collector.
+    Run-scoped event recording.
 
-    Collects all events for a run in chronological order.
-    Supports event listeners for real-time SSE streaming.
-
-    Usage::
-
-        tracker = EventTracker()
-
-        # Emit events
-        tracker.emit(EventType.RUN_CREATED, run_id="run-123",
-                     data={"goal": "Research AI"})
-        tracker.emit(EventType.AGENT_STARTED, run_id="run-123",
-                     agent_role="researcher", task_id="task-001")
-
-        # Get events
-        events = tracker.get_events("run-123")
-
-        # Register listener for SSE
-        tracker.add_listener(lambda event: send_sse(event))
+    Records timestamped events for a run, providing timeline access
+    and event-type summaries.
     """
 
     def __init__(self) -> None:
-        self._events: Dict[str, List[TraceEvent]] = {}  # run_id -> events
-        self._global_events: List[TraceEvent] = []
-        self._listeners: List[Callable[[TraceEvent], None]] = []
+        self._events: Dict[str, List[Dict[str, Any]]] = {}
 
-    def emit(
+    def record(
         self,
+        run_id: str,
         event_type: EventType,
-        run_id: str = "",
         data: Optional[Dict[str, Any]] = None,
         agent_role: str = "",
         task_id: str = "",
+        node_id: str = "",
         duration_ms: float = 0.0,
-    ) -> TraceEvent:
-        """
-        Emit a structured event.
-
-        The event is:
-          1. Stored in the run's event list
-          2. Stored in the global event list
-          3. Dispatched to all registered listeners
-
-        Returns the created TraceEvent.
-        """
-        event = TraceEvent(
-            event_type=event_type,
-            run_id=run_id,
-            data=data,
-            agent_role=agent_role,
-            task_id=task_id,
-            duration_ms=duration_ms,
-        )
-
-        # Store
-        if run_id:
-            self._events.setdefault(run_id, []).append(event)
-        self._global_events.append(event)
-
-        # Log
-        logger.info(
-            "[Tracker] %s run=%s agent=%s task=%s",
-            event_type.value,
-            run_id or "-",
-            agent_role or "-",
-            task_id or "-",
-        )
-
-        # Notify listeners
-        for listener in self._listeners:
-            try:
-                listener(event)
-            except Exception as e:
-                logger.warning("Event listener error: %s", e)
-
+    ) -> Dict[str, Any]:
+        """Record a timestamped event."""
+        event = {
+            "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+            "event_type": event_type.value,
+            "run_id": run_id,
+            "timestamp": time.time(),
+            "data": data or {},
+            "agent_role": agent_role,
+            "task_id": task_id,
+            "node_id": node_id,
+            "duration_ms": duration_ms,
+        }
+        self._events.setdefault(run_id, []).append(event)
         return event
 
-    # ── Convenience Emitters ──────────────────────────────────────────
-
-    def emit_run_created(self, run_id: str, goal: str, user_id: str = "") -> TraceEvent:
-        return self.emit(EventType.RUN_CREATED, run_id, {"goal": goal, "user_id": user_id})
-
-    def emit_plan_created(self, run_id: str, task_count: int, template: str = "") -> TraceEvent:
-        return self.emit(EventType.PLAN_CREATED, run_id, {"task_count": task_count, "template": template})
-
-    def emit_agent_started(self, run_id: str, agent_role: str, task_id: str, description: str = "") -> TraceEvent:
-        return self.emit(EventType.AGENT_STARTED, run_id, {"description": description}, agent_role, task_id)
-
-    def emit_agent_completed(self, run_id: str, agent_role: str, task_id: str, duration_ms: float = 0.0, tokens: int = 0) -> TraceEvent:
-        return self.emit(EventType.AGENT_COMPLETED, run_id, {"tokens": tokens}, agent_role, task_id, duration_ms)
-
-    def emit_agent_failed(self, run_id: str, agent_role: str, task_id: str, error: str = "") -> TraceEvent:
-        return self.emit(EventType.AGENT_FAILED, run_id, {"error": error}, agent_role, task_id)
-
-    def emit_tool_requested(self, run_id: str, tool_name: str, agent_role: str = "") -> TraceEvent:
-        return self.emit(EventType.TOOL_REQUESTED, run_id, {"tool_name": tool_name}, agent_role)
-
-    def emit_tool_allowed(self, run_id: str, tool_name: str, agent_role: str = "") -> TraceEvent:
-        return self.emit(EventType.TOOL_ALLOWED, run_id, {"tool_name": tool_name}, agent_role)
-
-    def emit_tool_denied(self, run_id: str, tool_name: str, agent_role: str = "", reason: str = "") -> TraceEvent:
-        return self.emit(EventType.TOOL_DENIED, run_id, {"tool_name": tool_name, "reason": reason}, agent_role)
-
-    def emit_security_check(self, run_id: str, verdict: str, rule: str = "", agent_role: str = "") -> TraceEvent:
-        return self.emit(EventType.SECURITY_CHECK, run_id, {"verdict": verdict, "rule": rule}, agent_role)
-
-    def emit_approval_requested(self, run_id: str, approval_id: str, tool_name: str = "") -> TraceEvent:
-        return self.emit(EventType.APPROVAL_REQUESTED, run_id, {"approval_id": approval_id, "tool_name": tool_name})
-
-    def emit_approved(self, run_id: str, approval_id: str) -> TraceEvent:
-        return self.emit(EventType.APPROVED, run_id, {"approval_id": approval_id})
-
-    def emit_rejected(self, run_id: str, approval_id: str, reason: str = "") -> TraceEvent:
-        return self.emit(EventType.REJECTED, run_id, {"approval_id": approval_id, "reason": reason})
-
-    def emit_run_completed(self, run_id: str, status: str, duration_ms: float = 0.0, total_cost: float = 0.0) -> TraceEvent:
-        return self.emit(EventType.RUN_COMPLETED, run_id, {"status": status, "total_cost_usd": total_cost}, duration_ms=duration_ms)
-
-    # ── Queries ───────────────────────────────────────────────────────
-
     def get_events(self, run_id: str) -> List[Dict[str, Any]]:
-        """Return all events for a run in chronological order."""
-        return [e.to_dict() for e in self._events.get(run_id, [])]
-
-    def get_events_by_type(self, run_id: str, event_type: EventType) -> List[Dict[str, Any]]:
-        """Return events of a specific type for a run."""
-        return [
-            e.to_dict()
-            for e in self._events.get(run_id, [])
-            if e.event_type == event_type
-        ]
-
-    def get_event_count(self, run_id: str) -> int:
-        """Return total event count for a run."""
-        return len(self._events.get(run_id, []))
-
-    def get_all_run_ids(self) -> List[str]:
-        """Return all run IDs with events."""
-        return list(self._events.keys())
+        """Get all events for a run."""
+        return list(self._events.get(run_id, []))
 
     def get_event_summary(self, run_id: str) -> Dict[str, int]:
-        """Return event type counts for a run."""
+        """Get event count by type for a run."""
         summary: Dict[str, int] = {}
-        for e in self._events.get(run_id, []):
-            summary[e.event_type.value] = summary.get(e.event_type.value, 0) + 1
+        for evt in self._events.get(run_id, []):
+            t = evt.get("event_type", "unknown")
+            summary[t] = summary.get(t, 0) + 1
         return summary
 
-    def get_timeline(self, run_id: str) -> List[Dict[str, Any]]:
-        """Return a simplified timeline for UI rendering."""
-        events = self._events.get(run_id, [])
-        if not events:
-            return []
-        start_time = events[0].timestamp
-        return [
-            {
-                "event_type": e.event_type.value,
-                "offset_ms": round((e.timestamp - start_time) * 1000, 1),
-                "agent_role": e.agent_role,
-                "task_id": e.task_id,
-                "duration_ms": e.duration_ms,
-            }
-            for e in events
-        ]
+    def get_all_run_ids(self) -> List[str]:
+        """Get all run IDs with events."""
+        return list(self._events.keys())
 
-    # ── Listeners ─────────────────────────────────────────────────────
+    def get_event_count(self, run_id: str) -> int:
+        """Get total event count for a run."""
+        return len(self._events.get(run_id, []))
 
-    def add_listener(self, callback: Callable[[TraceEvent], None]) -> None:
-        """Register an event listener for real-time notifications."""
-        self._listeners.append(callback)
 
-    def remove_listener(self, callback: Callable[[TraceEvent], None]) -> None:
-        """Remove an event listener."""
-        self._listeners = [l for l in self._listeners if l is not callback]
+    # ── Convenient Event Helper Methods ─────────────────────────────────
 
-    def clear_listeners(self) -> None:
-        """Remove all listeners."""
-        self._listeners.clear()
+    def emit_run_created(self, run_id: str, goal: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Emit a RUN_CREATED event."""
+        return self.record(
+            run_id=run_id,
+            event_type=EventType.RUN_CREATED,
+            data={"goal": goal, "user_id": user_id},
+        )
+
+    def emit_run_completed(self, run_id: str, status: str = "completed", total_cost: float = 0.0) -> Dict[str, Any]:
+        """Emit a RUN_COMPLETED event."""
+        return self.record(
+            run_id=run_id,
+            event_type=EventType.RUN_COMPLETED,
+            data={"status": status, "total_cost_usd": total_cost},
+        )
+
+    def emit_approved(self, run_id: str, approval_id: str) -> Dict[str, Any]:
+        """Emit an APPROVED event."""
+        return self.record(
+            run_id=run_id,
+            event_type=EventType.APPROVED,
+            data={"approval_id": approval_id},
+        )
+
+    def emit_rejected(self, run_id: str, approval_id: str, reason: str = "") -> Dict[str, Any]:
+        """Emit a REJECTED event."""
+        return self.record(
+            run_id=run_id,
+            event_type=EventType.REJECTED,
+            data={"approval_id": approval_id, "reason": reason},
+        )
+

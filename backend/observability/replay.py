@@ -293,3 +293,136 @@ class ReplayEngine:
                 ),
             },
         }
+
+
+# ── Replay Comparison (V1-compat) ─────────────────────────────────────
+
+
+class ReplayComparison:
+    """
+    Side-by-side comparison of an original run and a replay.
+
+    Computes deltas for cost, latency, and success metrics.
+
+    Usage::
+
+        comparison = ReplayComparison(
+            original_run_id="run-orig",
+            replay_run_id="replay-001",
+            original_summary={...},
+            replay_summary={...},
+            original_cost={...},
+            replay_cost={...},
+            provider_override="ollama",
+        )
+        table = comparison.summary_table()
+    """
+
+    def __init__(
+        self,
+        original_run_id: str,
+        replay_run_id: str,
+        original_summary: Optional[Dict[str, Any]] = None,
+        replay_summary: Optional[Dict[str, Any]] = None,
+        original_cost: Optional[Dict[str, Any]] = None,
+        replay_cost: Optional[Dict[str, Any]] = None,
+        provider_override: str = "",
+    ):
+        self.original_run_id = original_run_id
+        self.replay_run_id = replay_run_id
+        self.original_summary = original_summary or {}
+        self.replay_summary = replay_summary or {}
+        self.original_cost = original_cost or {}
+        self.replay_cost = replay_cost or {}
+        self.provider_override = provider_override
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export comparison as a dict."""
+        orig_cost = self.original_cost.get("total_cost_usd", 0.0)
+        replay_cost = self.replay_cost.get("total_cost_usd", 0.0)
+        orig_latency = self.original_summary.get("elapsed_ms", 0.0)
+        replay_latency = self.replay_summary.get("elapsed_ms", 0.0)
+        orig_tokens = self.original_cost.get("total_tokens", 0)
+        replay_tokens = self.replay_cost.get("total_tokens", 0)
+        orig_succeeded = self.original_summary.get("nodes_succeeded", 0)
+        replay_succeeded = self.replay_summary.get("nodes_succeeded", 0)
+        orig_failed = self.original_summary.get("nodes_failed", 0)
+        replay_failed = self.replay_summary.get("nodes_failed", 0)
+
+        return {
+            "original_run_id": self.original_run_id,
+            "replay_run_id": self.replay_run_id,
+            "provider_override": self.provider_override,
+            "original_summary": self.original_summary,
+            "replay_summary": self.replay_summary,
+            "original_cost": self.original_cost,
+            "replay_cost": self.replay_cost,
+            "comparison": {
+                "cost_usd": {
+                    "original": orig_cost,
+                    "replay": replay_cost,
+                    "delta": round(replay_cost - orig_cost, 6),
+                },
+                "latency_ms": {
+                    "original": orig_latency,
+                    "replay": replay_latency,
+                    "delta": round(replay_latency - orig_latency, 1),
+                },
+                "tokens": {
+                    "original": orig_tokens,
+                    "replay": replay_tokens,
+                    "delta": replay_tokens - orig_tokens,
+                },
+                "nodes_succeeded": {
+                    "original": orig_succeeded,
+                    "replay": replay_succeeded,
+                    "delta": replay_succeeded - orig_succeeded,
+                },
+                "nodes_failed": {
+                    "original": orig_failed,
+                    "replay": replay_failed,
+                    "delta": replay_failed - orig_failed,
+                },
+            },
+        }
+
+    def summary_table(self) -> str:
+        """Return a markdown table comparing original and replay."""
+        d = self.to_dict()
+        comp = d["comparison"]
+
+        def _fmt_delta(v: float, fmt: str = ".4f") -> str:
+            sign = "+" if v > 0 else ""
+            return f"{sign}{v:{fmt}}"
+
+        rows = [
+            ("Cost (USD)",
+             f"${comp['cost_usd']['original']:.4f}",
+             f"${comp['cost_usd']['replay']:.4f}",
+             _fmt_delta(comp['cost_usd']['delta'])),
+            ("Latency (ms)",
+             f"{comp['latency_ms']['original']:.0f}",
+             f"{comp['latency_ms']['replay']:.0f}",
+             _fmt_delta(comp['latency_ms']['delta'], ".0f")),
+            ("Tokens",
+             str(comp['tokens']['original']),
+             str(comp['tokens']['replay']),
+             _fmt_delta(comp['tokens']['delta'], ".0f")),
+            ("Nodes Succeeded",
+             str(comp['nodes_succeeded']['original']),
+             str(comp['nodes_succeeded']['replay']),
+             _fmt_delta(comp['nodes_succeeded']['delta'], ".0f")),
+            ("Nodes Failed",
+             str(comp['nodes_failed']['original']),
+             str(comp['nodes_failed']['replay']),
+             _fmt_delta(comp['nodes_failed']['delta'], ".0f")),
+        ]
+
+        header = "| Metric | Original | Replay | Delta |"
+        sep = "|--------|----------|--------|-------|"
+        lines = [header, sep]
+        for metric, orig, replay, delta in rows:
+            lines.append(f"| {metric} | {orig} | {replay} | {delta} |")
+
+        return "\n".join(lines)
+

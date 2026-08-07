@@ -429,3 +429,186 @@ class RunTrace:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), default=str, indent=2)
+
+
+# ── ExecutionTracer (V1-compat) ───────────────────────────────────────
+
+
+class ExecutionTracer:
+    """
+    V1-compat execution tracer that records TraceEvents for a run.
+
+    Usage::
+
+        tracer = ExecutionTracer("run-001")
+        event = tracer.emit(TraceEventType.RUN_START, data={"graph_id": "g1"})
+        timeline = tracer.get_timeline()
+    """
+
+    def __init__(self, run_id: str):
+        self._run_id = run_id
+        self._events: List["TraceEvent"] = []
+        self._start_time = time.time()
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def event_count(self) -> int:
+        return len(self._events)
+
+    def emit(
+        self,
+        event_type: "TraceEventType",
+        *,
+        node_id: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> "TraceEvent":
+        """Emit a trace event."""
+        from backend.schemas.artifacts import TraceEvent as TE
+        event = TE(
+            event_type=event_type,
+            run_id=self._run_id,
+            node_id=node_id,
+            data=data or {},
+        )
+        self._events.append(event)
+        return event
+
+    def get_events(
+        self,
+        event_type: Optional["TraceEventType"] = None,
+        node_id: Optional[str] = None,
+    ) -> List["TraceEvent"]:
+        """Filter events by type and/or node."""
+        result = self._events
+        if event_type is not None:
+            result = [e for e in result if e.event_type == event_type]
+        if node_id is not None:
+            result = [e for e in result if e.node_id == node_id]
+        return result
+
+    def get_all_events(self) -> List["TraceEvent"]:
+        """Return all events."""
+        return list(self._events)
+
+    def ingest_events(self, events: List["TraceEvent"]) -> None:
+        """Ingest events from another tracer, overwriting run_id."""
+        for e in events:
+            e.run_id = self._run_id
+        self._events.extend(events)
+
+    def get_timeline(self) -> List[Dict[str, Any]]:
+        """Return events as timeline dicts with elapsed_s."""
+        timeline = []
+        for e in self._events:
+            elapsed = e.timestamp - self._start_time if hasattr(e, 'timestamp') else 0.0
+            timeline.append({
+                "event_id": e.event_id,
+                "event_type": e.event_type.value if hasattr(e.event_type, 'value') else str(e.event_type),
+                "run_id": e.run_id,
+                "node_id": e.node_id,
+                "data": e.data,
+                "elapsed_s": round(elapsed, 4),
+                "timestamp": getattr(e, 'timestamp', 0),
+            })
+        return timeline
+
+    def export_dict(self) -> Dict[str, Any]:
+        """Export the tracer state as a dict."""
+        return {
+            "run_id": self._run_id,
+            "event_count": len(self._events),
+            "events": self.get_timeline(),
+            "start_time": self._start_time,
+        }
+
+    def export_json(self) -> str:
+        """Export as JSON string."""
+        return json.dumps(self.export_dict(), default=str, indent=2)
+
+
+# ── RunRecord (V1-compat) ────────────────────────────────────────────
+
+
+class RunRecord:
+    """
+    V1-compat record for a completed run.
+
+    Wraps an ExecutionTracer, graph, and cost summary.
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        tracer: Optional[ExecutionTracer] = None,
+        graph: Optional[Any] = None,
+        goal_text: str = "",
+        cost_summary: Optional[Dict[str, Any]] = None,
+        status: str = "completed",
+    ):
+        self.run_id = run_id
+        self.tracer = tracer
+        self.graph = graph
+        self.goal_text = goal_text
+        self.cost_summary = cost_summary or {}
+        self.status = status
+        self.created_at = time.time()
+
+    def to_summary_dict(self) -> Dict[str, Any]:
+        """Return a summary dict for listing."""
+        return {
+            "run_id": self.run_id,
+            "goal_text": self.goal_text,
+            "status": self.status,
+            "total_cost_usd": self.cost_summary.get("total_cost_usd", 0.0),
+            "total_tokens": self.cost_summary.get("total_tokens", 0),
+            "event_count": self.tracer.event_count if self.tracer else 0,
+            "created_at": self.created_at,
+        }
+
+
+# ── RunStore (V1-compat) ─────────────────────────────────────────────
+
+
+class RunStore:
+    """
+    In-memory CRUD store for RunRecord instances.
+
+    Usage::
+
+        store = RunStore()
+        store.store(record)
+        record = store.get("run-001")
+        store.delete("run-001")
+    """
+
+    def __init__(self) -> None:
+        self._records: Dict[str, RunRecord] = {}
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __contains__(self, run_id: str) -> bool:
+        return run_id in self._records
+
+    def store(self, record: RunRecord) -> None:
+        """Store a run record."""
+        self._records[record.run_id] = record
+
+    def get(self, run_id: str) -> Optional[RunRecord]:
+        """Retrieve a run record by ID."""
+        return self._records.get(run_id)
+
+    def delete(self, run_id: str) -> bool:
+        """Delete a run record. Returns True if deleted, False if not found."""
+        if run_id in self._records:
+            del self._records[run_id]
+            return True
+        return False
+
+    def list_runs(self) -> List[Dict[str, Any]]:
+        """Return summaries of all stored runs."""
+        return [r.to_summary_dict() for r in self._records.values()]
+
