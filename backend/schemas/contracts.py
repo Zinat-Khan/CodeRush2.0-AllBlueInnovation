@@ -1,12 +1,13 @@
 """
-AE-03 Core Pydantic v2 Typed Data Contracts.
+AE-03 Pydantic v2 Data Contracts (Directive V2).
 
-Defines the canonical data models used across the entire orchestrator:
-  - AgentRole enum (including sub_graph for nested workflows)
-  - AgentConfig: per-agent specification
-  - ExecutionGraph: validated DAG structure
-  - AgentMessage: typed inter-agent communication
-  - ExecutionStatus enum & ExecutionResult
+Defines all typed data models that flow through the LangGraph execution
+engine, PolicyEngine, RAG pipeline, observability layer, and API surface.
+
+Models per Directive V2 Section 13:
+  AgentConfig, ToolConfig, Task, TaskGraph, AgentMessage, Artifact,
+  ToolRequest, ToolResult, RunState, ApprovalRequest, SecurityDecision,
+  ResearchSource, RAGDocument, RAGChunk, VerificationResult, RunMetrics.
 """
 
 from __future__ import annotations
@@ -14,288 +15,422 @@ from __future__ import annotations
 import uuid
 from enum import Enum
 from time import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
-# ── Enums ──────────────────────────────────────────────────────────────
+# ── Enumerations ──────────────────────────────────────────────────────
 
 
 class AgentRole(str, Enum):
-    """All supported agent roles in the orchestrator."""
-
+    """Logical agent roles per Directive V2 Section 9."""
+    ORCHESTRATOR = "orchestrator"
     PLANNER = "planner"
     RESEARCHER = "researcher"
-    EXECUTOR = "executor"
+    RAG = "rag"
+    TOOL_EXECUTION = "tool_execution"
     ANALYST = "analyst"
     CRITIC = "critic"
     VERIFIER = "verifier"
+    SECURITY = "security"
     REPORTER = "reporter"
-    SUB_GRAPH = "sub_graph"  # REV2: Supports nested workflow delegation
+    VISUALIZATION = "visualization"
 
 
-class ExecutionStatus(str, Enum):
-    """Lifecycle status of a single node execution."""
-
+class TaskStatus(str, Enum):
+    """Status of a task within a workflow run."""
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
-    RETRYING = "retrying"
-    WAITING_FOR_APPROVAL = "waiting_for_approval"
-    COMPENSATING = "compensating"
     SKIPPED = "skipped"
+    BLOCKED = "blocked"
+    WAITING_APPROVAL = "waiting_approval"
 
 
-class ModelProvider(str, Enum):
-    """Supported LLM provider identifiers."""
-
-    OPENAI = "openai"
-    GEMINI = "gemini"
-    OLLAMA = "ollama"
-
-
-# ── Agent Configuration ────────────────────────────────────────────────
+class RiskLevel(str, Enum):
+    """Risk level for tool operations."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
-class AgentConfig(BaseModel):
-    """
-    Specification for a single agent node in the execution DAG.
+class ApprovalAction(str, Enum):
+    """HITL approval actions."""
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUEST_CHANGES = "request_changes"
 
-    When role is SUB_GRAPH, the agent delegates execution to a nested
-    ExecutionGraph identified by sub_graph_id.
-    """
 
-    agent_id: str = Field(
-        default_factory=lambda: f"agent-{uuid.uuid4().hex[:8]}",
-        description="Unique identifier for this agent instance.",
+class SecurityVerdict(str, Enum):
+    """PolicyEngine security decision verdicts."""
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+class RunStatus(str, Enum):
+    """Overall status of an execution run."""
+    PENDING = "pending"
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    WAITING_APPROVAL = "waiting_approval"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class DifficultyTier(str, Enum):
+    """Benchmark task difficulty."""
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+
+# ── Tool Configuration ───────────────────────────────────────────────
+
+
+class ToolConfig(BaseModel):
+    """Configuration for a native @tool function."""
+    name: str = Field(description="Unique tool identifier.")
+    description: str = Field(default="", description="Human-readable tool description.")
+    risk_level: RiskLevel = Field(default=RiskLevel.LOW, description="Risk classification.")
+    requires_approval: bool = Field(default=False, description="Whether HITL approval is needed.")
+    allowed_agents: List[AgentRole] = Field(
+        default_factory=list,
+        description="Agent roles permitted to invoke this tool.",
     )
-    role: AgentRole = Field(
-        description="Functional role determining the agent's behaviour.",
-    )
-    system_prompt: str = Field(
-        default="",
-        description="System-level instruction prompt for the LLM.",
+    resource_limits: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Resource constraints (max_tokens, timeout_seconds, etc.).",
     )
     input_schema: Dict[str, Any] = Field(
         default_factory=dict,
-        description="JSON Schema describing expected input payload.",
+        description="JSON Schema for tool input validation.",
     )
     output_schema: Dict[str, Any] = Field(
         default_factory=dict,
-        description="JSON Schema describing expected output payload.",
+        description="JSON Schema for tool output validation.",
     )
+
+
+# ── Agent Configuration ──────────────────────────────────────────────
+
+
+class AgentConfig(BaseModel):
+    """Configuration for a logical agent within the orchestration graph."""
+    agent_id: str = Field(
+        default_factory=lambda: f"agent-{uuid.uuid4().hex[:8]}",
+        description="Unique agent identifier.",
+    )
+    role: AgentRole = Field(description="Logical agent role.")
+    system_prompt: str = Field(default="", description="System prompt for the agent LLM.")
+    model_provider: str = Field(default="google", description="LLM provider for this agent.")
+    model_name: Optional[str] = Field(default=None, description="Override model name.")
     allowed_tools: List[str] = Field(
         default_factory=list,
-        description="Explicit tool allowlist enforced by PolicyEngine.",
+        description="Tool names this agent is permitted to invoke.",
     )
-    token_budget: int = Field(
-        default=4096,
-        ge=1,
-        description="Maximum tokens this agent may consume per invocation.",
-    )
-    model_provider: str = Field(
-        default="openai",
-        description="LLM provider to use (openai | gemini | ollama).",
-    )
-    model_name: Optional[str] = Field(
-        default=None,
-        description="Override model name. If None, uses provider default.",
-    )
-    timeout_seconds: int = Field(
-        default=120,
-        ge=1,
-        description="Maximum wall-clock seconds before the node is timed out.",
-    )
-    max_retries: int = Field(
-        default=2,
-        ge=0,
-        description="Maximum retry attempts on failure.",
-    )
-    requires_human_approval: bool = Field(
-        default=False,
-        description="If True, pause execution and wait for human sign-off.",
-    )
-    scratch_memory_ttl: int = Field(
-        default=300,
-        ge=0,
-        description="TTL in seconds for scratch memory entries (0 = no eviction).",
-    )
-
-    # ── REV2: Nested workflow support ──────────────────────────────────
-    sub_graph_id: Optional[str] = Field(
-        default=None,
-        description=(
-            "ID of the nested ExecutionGraph to delegate to. "
-            "Required when role is SUB_GRAPH."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def validate_sub_graph_consistency(self) -> "AgentConfig":
-        """Ensure sub_graph_id is set iff role is SUB_GRAPH."""
-        if self.role == AgentRole.SUB_GRAPH and not self.sub_graph_id:
-            raise ValueError(
-                "sub_graph_id is required when role is 'sub_graph'."
-            )
-        if self.role != AgentRole.SUB_GRAPH and self.sub_graph_id is not None:
-            raise ValueError(
-                "sub_graph_id must be None when role is not 'sub_graph'."
-            )
-        return self
+    max_retries: int = Field(default=2, description="Max retry attempts on failure.")
+    timeout_seconds: int = Field(default=120, description="Per-node execution timeout.")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-# ── Execution Graph ───────────────────────────────────────────────────
+# ── Task & Task Graph ────────────────────────────────────────────────
 
 
-class ExecutionGraph(BaseModel):
-    """
-    A validated Directed Acyclic Graph of agent nodes.
+class Task(BaseModel):
+    """A single task node within a workflow execution graph."""
+    task_id: str = Field(
+        default_factory=lambda: f"task-{uuid.uuid4().hex[:8]}",
+        description="Unique task identifier.",
+    )
+    agent_role: AgentRole = Field(description="Agent role assigned to this task.")
+    description: str = Field(default="", description="What this task should accomplish.")
+    dependencies: List[str] = Field(
+        default_factory=list,
+        description="task_ids that must complete before this task runs.",
+    )
+    tools_required: List[str] = Field(
+        default_factory=list,
+        description="Tool names needed for this task.",
+    )
+    status: TaskStatus = Field(default=TaskStatus.PENDING)
+    output: Dict[str, Any] = Field(default_factory=dict, description="Task output data.")
+    error: Optional[str] = Field(default=None, description="Error message if failed.")
+    started_at: Optional[float] = Field(default=None)
+    finished_at: Optional[float] = Field(default=None)
 
-    Represents a compiled execution plan produced by the Planner.
-    When parent_graph_id is set, this is a nested sub-graph.
-    """
 
+class TaskGraph(BaseModel):
+    """A directed acyclic graph of tasks representing a workflow plan."""
     graph_id: str = Field(
         default_factory=lambda: f"graph-{uuid.uuid4().hex[:8]}",
-        description="Unique identifier for this graph.",
+        description="Unique graph identifier.",
     )
-    version: str = Field(
-        default="1.0.0",
-        description="Semantic version of the graph definition.",
-    )
-    nodes: Dict[str, AgentConfig] = Field(
-        default_factory=dict,
-        description="Mapping of node_id → AgentConfig.",
-    )
-    edges: List[Tuple[str, str]] = Field(
-        default_factory=list,
-        description="Directed edges as (source_node_id, target_node_id) tuples.",
-    )
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Arbitrary metadata (goal text, compile timestamp, etc.).",
-    )
-    locked: bool = Field(
-        default=False,
-        description="If True, graph structure is frozen for execution.",
-    )
+    goal: str = Field(default="", description="Original user goal text.")
+    tasks: List[Task] = Field(default_factory=list, description="Ordered task nodes.")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: float = Field(default_factory=time)
 
-    # ── REV2: Nested graph support ─────────────────────────────────────
-    parent_graph_id: Optional[str] = Field(
-        default=None,
-        description="ID of the parent graph if this is a nested sub-graph.",
-    )
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """Look up a task by ID."""
+        for t in self.tasks:
+            if t.task_id == task_id:
+                return t
+        return None
 
-    def lock(self) -> None:
-        """Freeze the graph for execution. No further structural edits."""
-        self.locked = True
+    def get_root_tasks(self) -> List[Task]:
+        """Return tasks with no dependencies."""
+        return [t for t in self.tasks if not t.dependencies]
 
-    def get_node_ids(self) -> List[str]:
-        """Return all node IDs in the graph."""
-        return list(self.nodes.keys())
-
-    def get_predecessors(self, node_id: str) -> List[str]:
-        """Return IDs of all nodes that feed into the given node."""
-        return [src for src, tgt in self.edges if tgt == node_id]
-
-    def get_successors(self, node_id: str) -> List[str]:
-        """Return IDs of all nodes that the given node feeds into."""
-        return [tgt for src, tgt in self.edges if src == node_id]
-
-    def get_root_nodes(self) -> List[str]:
-        """Return node IDs with no incoming edges (entry points)."""
-        targets = {tgt for _, tgt in self.edges}
-        return [nid for nid in self.nodes if nid not in targets]
-
-    def get_leaf_nodes(self) -> List[str]:
-        """Return node IDs with no outgoing edges (exit points)."""
-        sources = {src for src, _ in self.edges}
-        return [nid for nid in self.nodes if nid not in sources]
+    def get_leaf_tasks(self) -> List[Task]:
+        """Return tasks that no other task depends on."""
+        depended_on = set()
+        for t in self.tasks:
+            depended_on.update(t.dependencies)
+        return [t for t in self.tasks if t.task_id not in depended_on]
 
 
-# ── Inter-Agent Communication ──────────────────────────────────────────
+# ── Agent Messages ───────────────────────────────────────────────────
 
 
 class AgentMessage(BaseModel):
-    """Typed message passed between agent nodes during execution."""
-
+    """A message exchanged between agents in the execution graph."""
     message_id: str = Field(
         default_factory=lambda: f"msg-{uuid.uuid4().hex[:8]}",
-        description="Unique message identifier.",
     )
-    sender_agent_id: str = Field(
-        description="ID of the agent that produced this message.",
-    )
-    target_agent_id: str = Field(
-        description="ID of the agent that should consume this message.",
-    )
-    payload: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="The typed data payload (validated against schemas).",
-    )
-    timestamp: float = Field(
-        default_factory=time,
-        description="Unix timestamp when the message was created.",
-    )
-    provenance_trace_id: str = Field(
-        default="",
-        description="Run-level trace ID for end-to-end provenance tracking.",
-    )
+    sender: AgentRole = Field(description="Sending agent role.")
+    receiver: AgentRole = Field(description="Receiving agent role.")
+    content: str = Field(default="", description="Message text content.")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Structured data.")
+    timestamp: float = Field(default_factory=time)
 
 
-# ── Execution Result ──────────────────────────────────────────────────
+# ── Artifacts ────────────────────────────────────────────────────────
 
 
-class ExecutionResult(BaseModel):
-    """Outcome of executing a single agent node."""
+class Artifact(BaseModel):
+    """An output artifact produced by an agent during execution."""
+    artifact_id: str = Field(
+        default_factory=lambda: f"art-{uuid.uuid4().hex[:8]}",
+    )
+    artifact_type: str = Field(
+        default="text",
+        description="Type (text | code | table | chart | report | json).",
+    )
+    title: str = Field(default="", description="Human-readable title.")
+    content: str = Field(default="", description="Artifact content body.")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    producer_agent: AgentRole = Field(default=AgentRole.REPORTER)
+    verified: bool = Field(default=False, description="Whether Verifier has validated this.")
+    created_at: float = Field(default_factory=time)
 
-    node_id: str = Field(description="ID of the executed node.")
-    status: ExecutionStatus = Field(description="Final execution status.")
-    output: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Output data produced by the node.",
+
+# ── Tool Request / Result ────────────────────────────────────────────
+
+
+class ToolRequest(BaseModel):
+    """A request from an agent to invoke a tool."""
+    request_id: str = Field(
+        default_factory=lambda: f"treq-{uuid.uuid4().hex[:8]}",
     )
-    tokens_used: int = Field(
-        default=0,
-        ge=0,
-        description="Total tokens consumed (prompt + completion).",
+    tool_name: str = Field(description="Name of the tool to invoke.")
+    agent_role: AgentRole = Field(description="Agent requesting the tool.")
+    agent_id: str = Field(default="", description="Specific agent instance ID.")
+    arguments: Dict[str, Any] = Field(default_factory=dict, description="Tool input arguments.")
+    risk_level: RiskLevel = Field(default=RiskLevel.LOW)
+    requires_approval: bool = Field(default=False)
+    timestamp: float = Field(default_factory=time)
+
+
+class ToolResult(BaseModel):
+    """Result returned from a tool invocation."""
+    request_id: str = Field(description="Matching ToolRequest ID.")
+    tool_name: str = Field(description="Name of the tool invoked.")
+    success: bool = Field(default=True)
+    output: Dict[str, Any] = Field(default_factory=dict, description="Tool output data.")
+    error: Optional[str] = Field(default=None, description="Error message if failed.")
+    tokens_used: int = Field(default=0)
+    cost_usd: float = Field(default=0.0)
+    latency_ms: float = Field(default=0.0)
+    timestamp: float = Field(default_factory=time)
+
+
+# ── Run State ────────────────────────────────────────────────────────
+
+
+class RunState(BaseModel):
+    """Overall state of an execution run (maps to LangGraph AgentState)."""
+    run_id: str = Field(
+        default_factory=lambda: f"run-{uuid.uuid4().hex[:8]}",
     )
-    tokens_prompt: int = Field(
-        default=0,
-        ge=0,
-        description="Prompt/input tokens consumed.",
+    user_id: str = Field(default="default_user")
+    workspace_id: str = Field(default="default_workspace")
+    goal: str = Field(default="")
+    plan: Optional[TaskGraph] = Field(default=None)
+    status: RunStatus = Field(default=RunStatus.PENDING)
+    artifacts: List[Artifact] = Field(default_factory=list)
+    messages: List[AgentMessage] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    metrics: Optional["RunMetrics"] = Field(default=None)
+    created_at: float = Field(default_factory=time)
+    updated_at: float = Field(default_factory=time)
+
+
+# ── Approval ─────────────────────────────────────────────────────────
+
+
+class ApprovalRequest(BaseModel):
+    """HITL approval request generated by LangGraph interrupt()."""
+    approval_id: str = Field(
+        default_factory=lambda: f"apr-{uuid.uuid4().hex[:8]}",
     )
-    tokens_completion: int = Field(
-        default=0,
-        ge=0,
-        description="Completion/output tokens consumed.",
+    run_id: str = Field(description="Associated run ID.")
+    agent_role: AgentRole = Field(description="Agent requesting approval.")
+    tool_name: str = Field(default="", description="Tool that triggered the approval.")
+    risk_level: RiskLevel = Field(default=RiskLevel.HIGH)
+    context_summary: str = Field(default="", description="Human-readable context.")
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    status: str = Field(default="pending", description="pending | approved | rejected | changes_requested")
+    action: Optional[ApprovalAction] = Field(default=None)
+    reason: Optional[str] = Field(default=None, description="Human reviewer's reason.")
+    timestamp: float = Field(default_factory=time)
+    resolved_at: Optional[float] = Field(default=None)
+
+
+# ── Security Decision ────────────────────────────────────────────────
+
+
+class SecurityDecision(BaseModel):
+    """Decision record from the deterministic PolicyEngine."""
+    decision_id: str = Field(
+        default_factory=lambda: f"sec-{uuid.uuid4().hex[:8]}",
     )
-    latency_ms: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Wall-clock execution time in milliseconds.",
+    verdict: SecurityVerdict = Field(description="Allow, deny, or require approval.")
+    tool_request: Optional[ToolRequest] = Field(default=None)
+    rule_matched: str = Field(default="", description="PolicyEngine rule that triggered.")
+    reason: str = Field(default="", description="Human-readable explanation.")
+    agent_role: Optional[AgentRole] = Field(default=None)
+    timestamp: float = Field(default_factory=time)
+
+
+# ── Research Sources ──────────────────────────────────────────────────
+
+
+class ResearchSource(BaseModel):
+    """A research source collected by the Researcher agent."""
+    source_id: str = Field(
+        default_factory=lambda: f"src-{uuid.uuid4().hex[:8]}",
     )
-    cost_usd: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Estimated cost in USD for this node's LLM usage.",
+    url: str = Field(default="", description="Source URL.")
+    title: str = Field(default="", description="Source title.")
+    content_hash: str = Field(default="", description="SHA-256 hash of content.")
+    snippet: str = Field(default="", description="Extracted text snippet.")
+    relevance_score: float = Field(default=0.0, description="Relevance to query (0-1).")
+    source_quality: str = Field(default="unknown", description="Quality assessment.")
+    retrieved_at: float = Field(default_factory=time)
+
+
+# ── RAG Documents & Chunks ───────────────────────────────────────────
+
+
+class RAGDocument(BaseModel):
+    """A document ingested into the RAG pipeline."""
+    document_id: str = Field(
+        default_factory=lambda: f"doc-{uuid.uuid4().hex[:8]}",
     )
-    provider_used: str = Field(
-        default="",
-        description="Provider that actually served the request (after fallback).",
+    filename: str = Field(default="")
+    content_type: str = Field(default="text/plain")
+    workspace_id: str = Field(default="default_workspace")
+    chunk_count: int = Field(default=0)
+    total_tokens: int = Field(default=0)
+    ingested_at: float = Field(default_factory=time)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RAGChunk(BaseModel):
+    """A chunk produced by RecursiveCharacterTextSplitter."""
+    chunk_id: str = Field(
+        default_factory=lambda: f"chk-{uuid.uuid4().hex[:8]}",
     )
-    retry_count: int = Field(
-        default=0,
-        ge=0,
-        description="Number of retry attempts before this result.",
-    )
-    error: Optional[str] = Field(
+    document_id: str = Field(description="Parent RAGDocument ID.")
+    content: str = Field(default="", description="Chunk text content.")
+    chunk_index: int = Field(default=0, description="Position within the document.")
+    embedding_vector: Optional[List[float]] = Field(
         default=None,
-        description="Error message if status is FAILED.",
+        description="Embedding vector (populated after embedding step).",
     )
-    error_trace: Optional[str] = Field(
-        default=None,
-        description="Full traceback string for debugging.",
+    workspace_id: str = Field(default="default_workspace")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Verification ─────────────────────────────────────────────────────
+
+
+class VerificationResult(BaseModel):
+    """Result from the Verifier agent's independent validation."""
+    verification_id: str = Field(
+        default_factory=lambda: f"ver-{uuid.uuid4().hex[:8]}",
     )
+    artifact_id: str = Field(description="Artifact being verified.")
+    passed: bool = Field(default=False, description="Whether verification passed.")
+    checks_run: List[str] = Field(default_factory=list, description="List of checks performed.")
+    checks_passed: List[str] = Field(default_factory=list)
+    checks_failed: List[str] = Field(default_factory=list)
+    issues: List[str] = Field(default_factory=list, description="Issues found.")
+    verifier_notes: str = Field(default="", description="Verifier's commentary.")
+    timestamp: float = Field(default_factory=time)
+
+
+# ── Run Metrics ──────────────────────────────────────────────────────
+
+
+class RunMetrics(BaseModel):
+    """Aggregated metrics for a completed execution run."""
+    total_tokens: int = Field(default=0)
+    prompt_tokens: int = Field(default=0)
+    completion_tokens: int = Field(default=0)
+    total_cost_usd: float = Field(default=0.0)
+    total_latency_ms: float = Field(default=0.0)
+    nodes_total: int = Field(default=0)
+    nodes_succeeded: int = Field(default=0)
+    nodes_failed: int = Field(default=0)
+    nodes_retried: int = Field(default=0)
+    tools_invoked: int = Field(default=0)
+    tools_denied: int = Field(default=0)
+    approvals_requested: int = Field(default=0)
+    approvals_granted: int = Field(default=0)
+    approvals_rejected: int = Field(default=0)
+    security_violations: int = Field(default=0)
+    rag_queries: int = Field(default=0)
+    research_sources_collected: int = Field(default=0)
+    critic_iterations: int = Field(default=0)
+    verification_pass_rate: float = Field(default=0.0)
+    provider_breakdown: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Per-provider token/cost breakdown.",
+    )
+
+
+# ── Benchmark Task ───────────────────────────────────────────────────
+
+
+class BenchmarkTask(BaseModel):
+    """A benchmark evaluation task loaded from DATA_PROVENANCE.md."""
+    task_id: str = Field(description="Unique task identifier (TASK-001, etc.).")
+    source_dataset: str = Field(description="Source dataset (AgentBench, SWE-bench Lite).")
+    category: str = Field(default="general")
+    difficulty_tier: DifficultyTier = Field(default=DifficultyTier.MEDIUM)
+    goal_text: str = Field(description="Natural-language goal for the task.")
+    expected_output_schema: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="JSON Schema for expected output validation.",
+    )
+    sha256_hash: str = Field(default="", description="Integrity hash of source data.")
+
+
+# ── Forward reference resolution ─────────────────────────────────────
+RunState.model_rebuild()

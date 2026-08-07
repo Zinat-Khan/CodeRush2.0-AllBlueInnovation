@@ -1,8 +1,13 @@
 """
-AE-03 Environment Vault & Application Configuration.
+AE-03 Environment Vault & Application Configuration (Directive V2).
 
 Uses Pydantic BaseSettings to load environment variables from .env file.
 Provides a singleton configuration instance via get_settings().
+
+Changes from V1:
+  - Removed: n8n_webhook_base_url
+  - Added: PRIMARY_PROVIDER, GOOGLE_API_KEY, GOOGLE_MODEL, RAG settings,
+           run budget limits, scratchpad TTL
 """
 
 from __future__ import annotations
@@ -24,85 +29,116 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
-    # ── LLM Provider Keys ──────────────────────────────────────────────
+    # ── Primary Provider Selection ────────────────────────────────────
+    primary_provider: str = Field(
+        default="google",
+        description="Primary LLM provider (google | openai | ollama).",
+    )
+    primary_model: str = Field(
+        default="gemini-1.5-pro",
+        description="Primary model identifier.",
+    )
+
+    # ── Google Gemini ─────────────────────────────────────────────────
+    google_api_key: str = Field(
+        default="",
+        description="Google API key for Gemini models.",
+    )
+    google_model: str = Field(
+        default="gemini-1.5-pro",
+        description="Default Google Gemini model identifier.",
+    )
+
+    # ── OpenAI (Fallback 1) ───────────────────────────────────────────
     openai_api_key: str = Field(
         default="",
         description="OpenAI API key for GPT-4o / GPT-4o-mini.",
     )
-    gemini_api_key: str = Field(
-        default="",
-        description="Google Gemini API key for Gemini 1.5 Pro.",
-    )
-    ollama_host: str = Field(
-        default="http://localhost:11434",
-        description="Base URL for the local Ollama server.",
-    )
-
-    # ── n8n Integration ────────────────────────────────────────────────
-    n8n_webhook_base_url: str = Field(
-        default="https://uzaifah.app.n8n.cloud/webhook",
-        description="Base URL for n8n webhook endpoints.",
-    )
-
-    # ── Application Defaults ───────────────────────────────────────────
-    log_level: str = Field(default="INFO", description="Logging verbosity.")
-    default_provider: str = Field(
-        default="openai",
-        description="Default LLM provider (openai | gemini | ollama).",
-    )
-    default_model_openai: str = Field(
+    openai_model: str = Field(
         default="gpt-4o",
         description="Default OpenAI model identifier.",
     )
-    default_model_gemini: str = Field(
-        default="gemini-1.5-pro",
-        description="Default Gemini model identifier.",
+
+    # ── Ollama (Fallback 2 — Local) ───────────────────────────────────
+    ollama_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Base URL for the local Ollama server.",
     )
-    default_model_ollama: str = Field(
-        default="llama3",
+    ollama_model: str = Field(
+        default="llama3.2",
         description="Default Ollama model identifier.",
     )
 
-    # ── Engine Defaults ────────────────────────────────────────────────
-    max_retries: int = Field(
-        default=2,
-        description="Maximum retry attempts per failed node.",
+    # ── RAG Pipeline ──────────────────────────────────────────────────
+    vector_store_type: str = Field(
+        default="chroma",
+        description="Vector store backend (chroma | faiss).",
     )
-    default_timeout_seconds: int = Field(
-        default=120,
-        description="Default per-node execution timeout in seconds.",
+    embedding_provider: str = Field(
+        default="google",
+        description="Embedding provider (google | huggingface).",
     )
-    scratch_memory_ttl_seconds: int = Field(
-        default=300,
-        description="Default TTL for agent scratch memory entries (seconds).",
+    chroma_persist_dir: str = Field(
+        default="./data/chroma",
+        description="Directory for Chroma vector store persistence.",
     )
-    scratch_memory_max_entries: int = Field(
+    rag_chunk_size: int = Field(
         default=1000,
-        description="Maximum scratch memory entries per agent before LRU eviction.",
+        description="RecursiveCharacterTextSplitter chunk_size.",
+    )
+    rag_chunk_overlap: int = Field(
+        default=200,
+        description="RecursiveCharacterTextSplitter chunk_overlap.",
     )
 
-    # ── Helpers ────────────────────────────────────────────────────────
-    def get_model_for_provider(self, provider: str) -> str:
-        """Return the default model identifier for the given provider name."""
-        mapping = {
-            "openai": self.default_model_openai,
-            "gemini": self.default_model_gemini,
-            "ollama": self.default_model_ollama,
-        }
-        return mapping.get(provider, self.default_model_openai)
+    # ── Run Budget Limits ─────────────────────────────────────────────
+    max_runtime_seconds: int = Field(
+        default=300,
+        description="Maximum wall-clock runtime per execution run.",
+    )
+    max_tokens: int = Field(
+        default=100000,
+        description="Maximum total tokens per execution run.",
+    )
+    max_cost: float = Field(
+        default=5.0,
+        description="Maximum USD cost per execution run.",
+    )
 
-    def has_provider_key(self, provider: str) -> bool:
-        """Check whether the required API key is configured for a provider."""
-        if provider == "openai":
-            return bool(self.openai_api_key)
-        if provider == "gemini":
-            return bool(self.gemini_api_key)
-        if provider == "ollama":
-            return True  # No API key needed for local Ollama
-        return False
+    # ── Scratchpad / Memory ───────────────────────────────────────────
+    scratchpad_ttl_seconds: int = Field(
+        default=300,
+        description="TTL for scratch memory entries (seconds).",
+    )
+    max_scratchpad_entries: int = Field(
+        default=100,
+        description="Maximum number of scratchpad entries per run.",
+    )
+
+    # ── Application ───────────────────────────────────────────────────
+    log_level: str = Field(default="INFO", description="Logging verbosity.")
+
+    # ── Derived Helpers ───────────────────────────────────────────────
+
+    def get_provider_api_key(self, provider: str) -> str:
+        """Return the API key for a given provider name."""
+        mapping = {
+            "google": self.google_api_key,
+            "openai": self.openai_api_key,
+        }
+        return mapping.get(provider, "")
+
+    def get_provider_model(self, provider: str) -> str:
+        """Return the default model for a given provider name."""
+        mapping = {
+            "google": self.google_model,
+            "openai": self.openai_model,
+            "ollama": self.ollama_model,
+        }
+        return mapping.get(provider, self.primary_model)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
-    """Return the singleton AppSettings instance (cached after first call)."""
+    """Return a cached singleton AppSettings instance."""
     return AppSettings()

@@ -1,12 +1,31 @@
-# AE-03 Backend Dependencies
+# AE-03 Backend Dependencies (Directive V2)
+
+# ── Core Framework ────────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.10.0
 pydantic-settings>=2.5.0
-httpx>=0.27.0
-openai>=1.50.0
-google-generativeai>=0.8.0
-sse-starlette>=2.0.0
 python-dotenv>=1.0.0
+
+# ── LangChain / LangGraph Orchestration ───────────────────────────────
+langchain>=0.3.0
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# ── LLM Provider Integrations ────────────────────────────────────────
+langchain-google-genai>=2.0.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+
+# ── RAG Pipeline ──────────────────────────────────────────────────────
+chromadb>=0.5.0
+faiss-cpu>=1.8.0
+sentence-transformers>=3.0.0
+
+# ── HTTP & Streaming ─────────────────────────────────────────────────
+httpx>=0.27.0
+sse-starlette>=2.0.0
+
+# ── Testing ───────────────────────────────────────────────────────────
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
