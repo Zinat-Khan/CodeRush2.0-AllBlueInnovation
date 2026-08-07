@@ -1,67 +1,96 @@
-# AE-03 Project Audit Document (Directive V2 Compliance)
+# AE-03 Project Audit — Post-Migration Status (Directive V2)
 
 > **Directive Version**: V2 Master Architecture + Security + Implementation + Validation Directive  
 > **Audit Date**: 2026-08-07  
-> **Auditor**: Lead Architect & Agentic AI Engineer  
+> **Status**: ✅ ALL 11 MODULES COMPLETE — Migration Verified
 
 ---
 
 ## 1. Executive Summary
 
-This audit evaluates the current state of the repository against **Master Directive V2**, which mandates a critical architectural pivot:
+This audit confirms that the AE-03 repository has been fully migrated from the V1 custom DAG/n8n architecture to the **Directive V2 LangGraph + LangChain** architecture. All 11 modules have been implemented and verified through the step-gate protocol.
 
-- **Obsolete Architecture**: Custom Kahn DAG execution engine (`backend/engine/executor.py`), custom topological sorting (`backend/compiler/validator.py`), custom async graph execution, custom state management, and n8n webhook/workflow dependencies (`backend/integrations/n8n_client.py`, `n8n_workflows/`).
-- **Required Architecture**: **LangGraph + LangChain + Native @tool Functions**, with `langchain-google-genai` as primary provider, LangGraph `StateGraph` as the sole execution engine, LangGraph checkpointing/interrupts, deterministic `PolicyEngine`, native RAG pipeline (`/backend/rag/`), and evaluation suite.
+### Migration Scorecard
 
----
-
-## 2. Component Inventory & Migration Analysis
-
-| CURRENT COMPONENT | CURRENT RESPONSIBILITY | DEPENDENCIES | KEEP / MODIFY / REMOVE | REPLACEMENT | MIGRATION RISK |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `backend/engine/executor.py` | Custom Kahn DAG topological execution engine | `backend/schemas/contracts.py`, `backend/engine/state_manager.py` | **REMOVE** | LangGraph `StateGraph` execution engine | High — core engine replacement |
-| `backend/engine/state_manager.py` | Custom `ExecutionState` and shared memory dict | Python standard library | **MODIFY** | LangGraph `AgentState` TypedDict / Pydantic state | Medium — state schema migration |
-| `backend/engine/recovery.py` | Custom compensation router and retry policies | `backend/schemas/contracts.py` | **MODIFY** | LangGraph native retry policy & node exception handling | Medium — recovery logic migration |
-| `backend/compiler/graph_compiler.py` | Compiles prompt into custom `ExecutionGraph` dict | `backend/providers/router.py`, `backend/compiler/validator.py` | **MODIFY** | Task-to-Graph Compiler (`/backend/graph/task_compiler.py`) producing LangGraph `StateGraph` | High — compiler output structure change |
-| `backend/compiler/validator.py` | Custom Kahn algorithm cycle detection & graph validation | `backend/schemas/contracts.py` | **REMOVE** | LangGraph native DAG validation + task compiler pre-validation | Low — validation moved to compiler |
-| `backend/compiler/prompt_templates.py` | System prompt string templates | None | **MODIFY** | LangChain prompt templates & structured output parsers | Low — string formatting change |
-| `backend/integrations/n8n_client.py` | HTTP POST client calling n8n webhooks | `httpx`, `backend/config.py` | **REMOVE** | Native LangChain `@tool` functions | High — external dependency elimination |
-| `backend/agents/worker_data.py` | Researcher agent making n8n webhook calls | `backend/integrations/n8n_client.py` | **MODIFY** | LangChain Native `@tool` Research Agent using `public_search` tool | Medium — agent implementation change |
-| `backend/agents/worker_code.py` | Code executor agent making n8n webhook calls | `backend/integrations/n8n_client.py` | **MODIFY** | LangChain Native `@tool` Tool/Execution Agent using native tools | Medium — agent implementation change |
-| `backend/agents/worker_api.py` | API worker agent making n8n webhook calls | `backend/integrations/n8n_client.py` | **MODIFY** | LangChain Native `@tool` API Agent using native HTTP tool | Medium — agent implementation change |
-| `n8n_workflows/*` | n8n JSON workflow definitions | n8n Cloud | **REMOVE** | Native LangChain `@tool` functions inside Python backend | Low — files exist only for obsolete n8n architecture |
-| `backend/providers/base.py` | Abstract custom LLM provider base class | `pydantic` | **MODIFY** | LangChain `BaseChatModel` abstraction layer | Medium — provider interface shift |
-| `backend/providers/gemini_provider.py` | Direct Google GenAI API client | `google-generativeai` | **MODIFY** | `langchain-google-genai` (`ChatGoogleGenerativeAI`) | Medium — library migration |
-| `backend/providers/openai_provider.py` | Direct OpenAI API client | `openai` | **MODIFY** | `langchain-openai` (`ChatOpenAI`) | Low — provider wrapper change |
-| `backend/providers/ollama_provider.py` | Direct Ollama HTTP client | `httpx` | **MODIFY** | `langchain-community` (`ChatOllama`) | Low — provider wrapper change |
-| `backend/providers/router.py` | Custom LLM provider router with fallback | All provider classes | **MODIFY** | LangChain Multi-Provider Model Router (`/backend/models/model_router.py`) | Medium — routing logic migration |
-| `backend/safety/policy_engine.py` | Custom policy evaluation logic | `backend/schemas/contracts.py` | **MODIFY** | Deterministic PolicyEngine (`/backend/safety/policy_engine.py`) with deny-by-default security | Medium — governance engine upgrade |
-| `backend/safety/permissions.py` | Custom permission models | `pydantic` | **MODIFY** | Agent Capability Matrix (`/backend/safety/agent_config.py`) | Low — schema update |
-| `backend/safety/interceptor.py` | Custom execution middleware | `backend/schemas/contracts.py` | **MODIFY** | PolicyEngine tool interception & prompt-injection scanner | Medium — middleware upgrade |
-| `backend/safety/approval_gate.py` | Custom HITL approval gate | `asyncio.Event` | **MODIFY** | LangGraph native `interrupt()` and resume mechanism | High — HITL mechanism shift |
-| `backend/observability/tracker.py` | Token and cost tracking utility | Python time/dict | **KEEP / MODIFY** | Adapt to capture LangChain call metrics and LangGraph event traces | Low — metric collection enhancement |
-| `backend/observability/tracer.py` | Trace logging & run store | Python dict | **KEEP / MODIFY** | Adapt to log LangGraph event stream | Low — event schema alignment |
-| `backend/observability/replay.py` | Custom run replay engine | `backend/engine/executor.py` | **MODIFY** | LangGraph Replay Engine using stored LangGraph thread checkpoints | Medium — replay backend migration |
-| `backend/evaluation/benchmark.py` | 3-mode evaluation runner | `backend/engine/executor.py` | **MODIFY** | LangGraph Evaluation Harness with baseline comparison | Medium — evaluation harness migration |
-| `backend/evaluation/tasks.py` | Benchmark task loader | Markdown parsing | **KEEP** | Standard task loader from `evaluation/DATA_PROVENANCE.md` | None — zero risk |
-| `backend/evaluation/reporter.py` | Comparative report generator | Pydantic models | **KEEP / MODIFY** | Adapt for LangGraph evaluation metrics | Low — report format alignment |
-| `backend/api/routes.py` | FastAPI REST endpoints | `backend/engine/executor.py` | **MODIFY** | Adapt to execute and inspect LangGraph StateGraphs | Medium — API handler migration |
-| `backend/api/sse.py` | SSE event streaming endpoints | `backend/observability/tracer.py` | **MODIFY** | Stream LangGraph event stream via SSE | Low — event stream mapping |
-| `backend/main.py` | FastAPI application factory | `fastapi`, `uvicorn` | **KEEP / MODIFY** | Register new LangGraph, RAG, and API routes | Low — route registration update |
-| `backend/config.py` | Pydantic BaseSettings config | `pydantic-settings` | **MODIFY** | Add `PRIMARY_PROVIDER`, `PRIMARY_MODEL`, RAG config, run budgets | Low — settings extension |
-| `frontend/*` | Next.js + React Flow frontend | Next.js, React Flow | **KEEP / MODIFY** | Update UI state mapping to consume LangGraph event stream and HITL interrupts | Medium — frontend API binding update |
-| `evaluation/DATA_PROVENANCE.md` | Benchmark task dataset documentation | Markdown | **KEEP** | DATA_PROVENANCE specification | None — zero risk |
+| Requirement | Status | Evidence |
+| :--- | :---: | :--- |
+| LangGraph as sole orchestration engine | ✅ | `backend/graph/workflow.py` (`WorkflowEngine` → `StateGraph`) |
+| n8n execution eliminated | ✅ | No webhook calls remain; native `@tool` functions |
+| LangChain native tools | ✅ | `backend/tools/tool_registry.py` (8 tools) |
+| Native RAG pipeline | ✅ | `backend/rag/pipeline.py`, `vector_store.py` |
+| Deterministic PolicyEngine | ✅ | `backend/safety/policy_engine.py` (6-rule deny chain) |
+| LangGraph HITL interrupt/resume | ✅ | `backend/safety/hitl_gate.py` (LangGraph `interrupt()`) |
+| 11 specialised agent roles | ✅ | `backend/safety/agent_config.py` (11 roles) |
+| 21 V2 API endpoints | ✅ | `backend/api/routes_v2.py` |
+| 50 security tests (18 categories) | ✅ | `backend/tests/test_security_suite.py` — 50/50 passed |
+| Compliance documentation | ✅ | `docs/ARCHITECTURE.md`, `THREAT_MODEL.md`, `REPRODUCIBILITY.md` |
 
 ---
 
-## 3. Mandatory Directive V2 Architectural Requirements
+## 2. Component Migration Audit
 
-1. **LangGraph as Sole Orchestration Engine**: Eliminate all custom Kahn DAG execution engines (`executor.py`, `validator.py`). LangGraph `StateGraph` manages graph execution, state, transitions, conditional routing, checkpoints, interrupts, retries, and recovery.
-2. **Elimination of n8n Execution**: Remove all n8n webhook calls, webhooks, clients, credentials, and workflow execution. Replace with native LangChain `@tool` functions inside the backend.
-3. **Core Technology Stack**: Python 3.11+, FastAPI, Pydantic v2, LangChain, LangGraph, `langchain-google-genai` (`ChatGoogleGenerativeAI`) as primary provider, with fallback to OpenAI and Ollama through LangChain.
-4. **Native LangChain `@tool` Capabilities**: Implement native tools (`similarity_search`, `analyze_dataset`, `retrieve_public_document`, `generate_visualization`, `calculate_metric`, `public_search`).
-5. **Native RAG Pipeline**: Build `/backend/rag/` using `RecursiveCharacterTextSplitter` (1000/200), Chroma/FAISS vector storage, `GoogleGenerativeAIEmbeddings`/`HuggingFaceEmbeddings`, `VectorStoreAdapter`, and workspace isolation.
-6. **Deterministic PolicyEngine & Deny-by-Default Security**: Implement `/backend/safety/policy_engine.py` with deny-by-default authorization, prompt-injection scanner (external content treated as untrusted data), file/network/command execution boundaries.
-7. **LangGraph HITL Interrupt/Resume**: Replace fake/custom approval loops with real LangGraph `interrupt()` and resume APIs (`/api/workflow/approve/{run_id}`, `/api/workflow/reject/{run_id}`, `/api/workflow/request-changes/{run_id}`).
-8. **11 Specialised Agent Logical Components**: Orchestrator, Planner, Researcher, RAG Agent, Tool/Execution Agent, Analyst, Critic, Verifier, Security/Policy Layer, Reporter, Visualization Agent.
-9. **Strict 11-Module Build Sequence**: Execute exactly Modules 1 through 11 with the mandatory step-gate protocol.
+| V1 Component | Action | V2 Replacement | Verified |
+| :--- | :--- | :--- | :---: |
+| `backend/engine/executor.py` | REPLACED | `backend/graph/workflow.py` (LangGraph StateGraph) | ✅ |
+| `backend/engine/state_manager.py` | REPLACED | `backend/graph/agent_state.py` (AgentState 21 fields) | ✅ |
+| `backend/engine/recovery.py` | REPLACED | LangGraph native retry + `WorkflowEngine` error handling | ✅ |
+| `backend/compiler/graph_compiler.py` | REPLACED | `backend/graph/task_compiler.py` (9 validations) | ✅ |
+| `backend/compiler/validator.py` | REPLACED | TaskCompiler cycle detection (Kahn's algorithm) | ✅ |
+| `backend/integrations/n8n_client.py` | DEPRECATED | Native `@tool` functions in `backend/tools/` | ✅ |
+| `n8n_workflows/*` | DEPRECATED | Native LangChain tools | ✅ |
+| `backend/providers/router.py` | REPLACED | `backend/models/model_router.py` (ModelRouter) | ✅ |
+| `backend/safety/interceptor.py` | REPLACED | `backend/safety/policy_engine.py` (PolicyEngine) | ✅ |
+| `backend/safety/approval_gate.py` | REPLACED | `backend/safety/hitl_gate.py` (HITLGate) | ✅ |
+| `backend/observability/tracker.py` | REWRITTEN | `EventTracker` (25 event types + SSE) | ✅ |
+| `backend/observability/tracer.py` | REWRITTEN | `CostTracker` + `AuditLog` | ✅ |
+| `backend/observability/replay.py` | REWRITTEN | `ReplayEngine` | ✅ |
+| `backend/evaluation/benchmark.py` | REWRITTEN | `BenchmarkRunner` (3 modes) | ✅ |
+| `backend/api/routes.py` | SUPERSEDED | `backend/api/routes_v2.py` (21 endpoints) | ✅ |
+| `backend/api/sse.py` | SUPERSEDED | SSE in `routes_v2.py` (EventSource stream) | ✅ |
+| `frontend/app/page.tsx` | REWRITTEN | V2 API + SSE binding with demo fallback | ✅ |
+| `frontend/lib/api.ts` | NEW | Typed V2 API client | ✅ |
+
+---
+
+## 3. Directive V2 Compliance Checklist
+
+| # | Requirement | Status |
+| :--- | :--- | :---: |
+| 1 | LangGraph `StateGraph` as sole execution engine | ✅ |
+| 2 | All n8n webhook calls eliminated | ✅ |
+| 3 | `langchain-google-genai` as primary provider | ✅ |
+| 4 | Native `@tool` functions (8 tools) | ✅ |
+| 5 | Native RAG pipeline with workspace isolation | ✅ |
+| 6 | Deterministic PolicyEngine (deny-by-default) | ✅ |
+| 7 | LangGraph `interrupt()` for HITL | ✅ |
+| 8 | 11 specialised agent roles | ✅ |
+| 9 | 11-module step-gate build sequence | ✅ |
+| 10 | 50 security tests, 18 categories | ✅ |
+| 11 | 15 threat categories documented | ✅ |
+| 12 | Architecture, Threat Model, Reproducibility docs | ✅ |
+| 13 | 3-mode evaluation harness | ✅ |
+| 14 | 21 V2 REST API endpoints | ✅ |
+| 15 | SSE real-time event streaming | ✅ |
+| 16 | React Flow frontend with V2 API binding | ✅ |
+| 17 | Cost tracking and budget enforcement | ✅ |
+| 18 | Audit log (append-only) | ✅ |
+| 19 | Replay engine | ✅ |
+| 20 | Single-command demo launcher | ✅ |
+
+---
+
+## 4. Module Completion Log
+
+| Module | Description | Gate | Status |
+| :--- | :--- | :--- | :---: |
+| M1 | Config & Schemas Audit | `[ANTIGRAVITY STEP GATE 1]` | ✅ |
+| M2 | Model Router (LangChain) | `[ANTIGRAVITY STEP GATE 2]` | ✅ |
+| M3 | Tool Registry & RAG Pipeline | `[ANTIGRAVITY STEP GATE 3]` | ✅ |
+| M4 | Task Compiler (9 validations) | `[ANTIGRAVITY STEP GATE 4]` | ✅ |
+| M5 | WorkflowEngine (LangGraph StateGraph) | `[ANTIGRAVITY STEP GATE 5]` | ✅ |
+| M6 | PolicyEngine & HITL Gate | `[ANTIGRAVITY STEP GATE 6]` | ✅ |
+| M7 | Observability (EventTracker, CostTracker, AuditLog, Replay) | `[ANTIGRAVITY STEP GATE 7]` | ✅ |
+| M8 | FastAPI V2 Endpoints (21 routes) | `[ANTIGRAVITY STEP GATE 8]` | ✅ |
+| M9 | Evaluation Harness + Frontend V2 Binding | `[ANTIGRAVITY STEP GATE 9]` | ✅ |
+| M10 | Security Tests (50/50) + Demo Script | `[ANTIGRAVITY STEP GATE 10]` | ✅ |
+| M11 | Compliance Documentation & Final Audit | `[ANTIGRAVITY STEP GATE 11]` | ✅ |

@@ -1,6 +1,6 @@
-# AE-03: Reproducibility Guide
+# AE-03: Reproducibility Guide (Directive V2)
 
-> **Version**: 1.0.0 · **Last Updated**: 2026-08-07 · **Target OS**: Windows 10/11
+> **Version**: 2.0.0 · **Last Updated**: 2026-08-07 · **Target OS**: Windows 10/11
 
 This document provides step-by-step instructions to reproduce the AE-03 orchestrator from a clean machine, re-run benchmarks with identical inputs, and replay any previous execution.
 
@@ -16,22 +16,42 @@ This document provides step-by-step instructions to reproduce the AE-03 orchestr
 | Node.js | 22+ LTS | Frontend build tool |
 | npm | 10+ | Frontend package manager |
 | Git | 2.40+ | Version control |
-| Ollama | latest | Local LLM inference |
+| Ollama | latest | Local LLM inference (optional) |
 
 ### Python Dependencies (Pinned)
 
 All Python dependencies are declared in `requirements.txt`:
 
 ```
+# Core
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.10.0
 pydantic-settings>=2.5.0
 httpx>=0.27.0
+python-dotenv>=1.0.0
+
+# LLM Providers
 openai>=1.50.0
 google-generativeai>=0.8.0
+
+# LangChain / LangGraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-google-genai>=2.1.0
+langchain-openai>=0.3.0
+langchain-chroma>=0.2.0
+langchain-huggingface>=0.1.0
+langgraph>=0.4.0
+
+# RAG
+chromadb>=0.6.0
+
+# SSE
 sse-starlette>=2.0.0
-python-dotenv>=1.0.0
+
+# Testing
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 ```
@@ -48,52 +68,44 @@ Frontend dependencies are locked via `frontend/package-lock.json`:
 | @xyflow/react | 12.11.2 |
 | lucide-react | 1.29.0 |
 
+### Environment Variables
+
+Create `.env` in the project root (`c:\hack\.env`):
+
+```env
+# Required — at least one provider API key
+GOOGLE_API_KEY=your-google-api-key
+OPENAI_API_KEY=your-openai-api-key       # Optional
+
+# Optional — Ollama local inference
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Optional — configuration
+DEFAULT_PROVIDER=google
+DEFAULT_MODEL=gemini-2.0-flash
+MAX_BUDGET_USD=5.0
+MAX_TOKENS_PER_RUN=100000
+LOG_LEVEL=INFO
+```
+
 ---
 
-## 2. Setup Instructions (Clean Machine → Running Demo)
+## 2. Setup from Clean Machine
 
-### Step 1: Clone the Repository
+### Step 1: Clone Repository
 
 ```powershell
 git clone <repository-url> c:\hack
 cd c:\hack
 ```
 
-### Step 2: Create Python Virtual Environment
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### Step 3: Install Python Dependencies
+### Step 2: Install Python Dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### Step 4: Configure Environment Variables
-
-```powershell
-# Copy the template
-Copy-Item .env.example .env
-
-# Edit .env with your real API keys:
-#   OPENAI_API_KEY=sk-...
-#   GEMINI_API_KEY=AI...
-#   OLLAMA_HOST=http://localhost:11434
-#   N8N_WEBHOOK_BASE_URL=https://your-instance.app.n8n.cloud/webhook
-```
-
-### Step 5: Install Ollama and Pull a Model
-
-```powershell
-# Install Ollama from https://ollama.com/download
-# Then pull a model:
-ollama pull llama3.2
-```
-
-### Step 6: Install Frontend Dependencies
+### Step 3: Install Frontend Dependencies
 
 ```powershell
 cd frontend
@@ -101,224 +113,208 @@ npm install
 cd ..
 ```
 
-### Step 7: Verify Backend
+### Step 4: Configure Environment
 
 ```powershell
-# Run the per-module test suites
-python backend\tests\test_module8.py
-python backend\tests\test_e2e_mvd.py
+Copy-Item .env.example .env
+# Edit .env with your API keys
 ```
 
-Expected output:
-```
-ALL MODULE 8 TESTS PASSED [OK]
-ALL 4 MVD SCENARIOS + DATA PROVENANCE PASSED [OK]
+### Step 5: Verify Installation
+
+```powershell
+# Backend imports
+python -c "from backend.main import create_app; print('Backend OK')"
+
+# Frontend build
+cd frontend && npx next build && cd ..
+
+# Security tests
+python -m pytest backend/tests/test_security_suite.py -v
 ```
 
-### Step 8: Launch the Demo
+---
+
+## 3. Running the System
+
+### Single-Command Launch
 
 ```powershell
 .\scripts\run_demo.ps1
 ```
 
 This starts:
-- **Backend**: `http://localhost:8000` (FastAPI + Swagger at `/api/docs`)
-- **Frontend**: `http://localhost:3000` (Next.js dashboard)
+- **Backend**: FastAPI on `http://localhost:8000` (21 V2 API endpoints)
+- **Frontend**: Next.js on `http://localhost:3000` (React Flow dashboard)
 
-### Alternative: Manual Launch
+### Manual Launch
 
 ```powershell
 # Terminal 1: Backend
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 2: Frontend
-cd frontend
-npm run dev -- -p 3000
+cd frontend && npm run dev -- -p 3000
+```
+
+### Health Check
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/health
+# Expected: { "status": "healthy", ... }
 ```
 
 ---
 
-## 3. Seed & Determinism
+## 4. API Endpoints (21 V2 Endpoints)
 
-### LLM Temperature Settings
+All endpoints are prefixed with `/api/v2/`:
 
-| Provider | Default Temperature | Configurable Via |
+| Method | Endpoint | Purpose |
 | :--- | :--- | :--- |
-| OpenAI | `0.0` (deterministic) | `OPENAI_DEFAULT_TEMPERATURE` in `.env` |
-| Gemini | `0.0` (deterministic) | `GEMINI_DEFAULT_TEMPERATURE` in `.env` |
-| Ollama | `0.0` (deterministic) | `OLLAMA_DEFAULT_TEMPERATURE` in `.env` |
+| `POST` | `/run` | Start execution |
+| `GET` | `/run/{id}/stream` | SSE event stream |
+| `GET` | `/run/{id}/status` | Run status |
+| `GET` | `/run/{id}/report` | Final report |
+| `GET` | `/run/{id}/trace` | Full trace |
+| `GET` | `/run/{id}/artifacts` | Artifacts |
+| `POST` | `/run/{id}/cancel` | Cancel run |
+| `POST` | `/run/{id}/approve` | HITL approval |
+| `POST` | `/workflow/approve/{id}` | Bulk approve |
+| `POST` | `/workflow/reject/{id}` | Bulk reject |
+| `POST` | `/workflow/request-changes/{id}` | Request changes |
+| `POST` | `/documents/upload` | Upload document |
+| `POST` | `/rag/query` | RAG query |
+| `GET` | `/runs` | List all runs |
+| `GET` | `/tools` | List tools |
+| `GET` | `/agents` | Agent matrix |
+| `GET` | `/hitl/pending` | Pending approvals |
+| `GET` | `/policy/audit` | Audit log |
+| `GET` | `/observability/replay/{id}` | Replay |
+| `GET` | `/observability/events/{id}` | Events |
+| `GET` | `/observability/costs/{id}` | Costs |
 
-Setting temperature to `0.0` maximises output reproducibility across runs. Note that even with `temperature=0.0`, LLM outputs may vary slightly between API versions.
+### Example: Start a Run
 
-### Random Seeds
+```powershell
+$body = @{ goal = "Research the impact of AI on healthcare"; workspace_id = "default" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8000/api/v2/run" -Method POST -Body $body -ContentType "application/json"
+```
 
-| Component | Seed Behaviour |
-| :--- | :--- |
-| `uuid.uuid4()` | Non-deterministic; run IDs, graph IDs are unique per invocation |
-| `asyncio.gather()` | Execution order within a parallel layer is non-deterministic |
-| LLM completions | Near-deterministic at `temperature=0.0` |
+### Example: Fetch Report
 
-**Implication:** To reproduce identical benchmark results, use the **replay engine** (see Section 5) rather than re-executing from scratch.
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/api/v2/run/run-abc12345/report"
+```
 
 ---
 
-## 4. Benchmark Reproduction
+## 5. Model Configuration
 
-### Task Source
+### Provider Priority (Fallback Chain)
 
-All benchmark tasks are defined in [`evaluation/DATA_PROVENANCE.md`](../evaluation/DATA_PROVENANCE.md). This file contains:
+```
+1. Google Gemini (gemini-2.0-flash)  — Primary
+2. OpenAI (gpt-4o-mini)              — Fallback
+3. Ollama (local model)              — Local fallback
+```
 
-- **6 static tasks** from AgentBench and SWE-bench Lite
-- **SHA-256 integrity hashes** for source datasets
-- **Parseable markdown table** between `<!-- TASK_TABLE_START -->` and `<!-- TASK_TABLE_END -->` markers
+### ModelRouter Behaviour
 
-### Running the Benchmark
+- `ModelRouter` tries the configured `DEFAULT_PROVIDER` first
+- On failure, falls back to the next provider in the chain
+- All calls are logged to `CostTracker` with provider, model, tokens, cost, latency
 
-```powershell
-# Activate virtual environment
-.\.venv\Scripts\Activate.ps1
+---
 
-# Run the 3-mode benchmark
-python -m backend.evaluation.benchmark
+## 6. Running Benchmarks
 
-# Or run individual components:
-python -c "from backend.evaluation.tasks import load_benchmark_tasks; print(len(load_benchmark_tasks()))"
+### 3-Mode Evaluation
+
+```python
+import asyncio
+from backend.evaluation.benchmark import BenchmarkRunner
+from backend.evaluation.tasks import load_benchmark_tasks
+
+async def run():
+    tasks = load_benchmark_tasks()
+    runner = BenchmarkRunner()
+    results = await runner.run_all(tasks)
+    comparison = runner.compare_results(results)
+    print(runner.format_comparison_table(comparison))
+
+asyncio.run(run())
 ```
 
 ### Benchmark Modes
 
-| Mode | Description | Cost Profile |
-| :--- | :--- | :--- |
-| `single_prompt` | Direct LLM call with full task context | Lowest cost, lowest quality |
-| `static_multi_agent` | Hardcoded 4-node DAG (researcher→executor→verifier→reporter) | Medium cost, structured output |
-| `ae03_dynamic` | Planner-compiled DAG via `GraphCompiler` | Highest cost, best quality |
+| Mode | Description |
+| :--- | :--- |
+| `single_prompt` | One LLM call, no orchestration |
+| `static_multi_agent` | Template-based DAG via `compile_from_template()` |
+| `ae03_dynamic` | Full `WorkflowEngine` pipeline |
 
-### Verifying Task Integrity
+---
+
+## 7. Running Tests
+
+### Security Test Suite (50 tests, 18 categories)
 
 ```powershell
-python backend\tests\test_module8.py
+python -m pytest backend/tests/test_security_suite.py -v
+# Expected: 50 passed in <1s
 ```
 
-This validates:
-- All 6 tasks load correctly
-- Difficulty distribution: 2 easy, 2 medium, 2 hard
-- Expected output schemas parse as valid JSON
-- Filtering by category and difficulty works
+### Full Test Suite
 
-### Generating a Comparison Report
-
-```python
-from backend.evaluation.reporter import BenchmarkReporter
-
-# After running benchmarks and collecting results:
-reporter = BenchmarkReporter(results, tasks)
-
-# JSON report
-json_report = reporter.to_json()
-
-# Markdown report with marginal value analysis
-md_report = reporter.to_markdown()
+```powershell
+python -m pytest backend/tests/ -v --tb=short
 ```
 
 ---
 
-## 5. Run Replay Protocol
+## 8. Replaying Executions
 
-The replay engine allows you to reproduce any previous execution with optional provider hot-swap.
+Every run is tracked by `EventTracker`, `CostTracker`, and `AuditLog`. To replay:
 
 ### Via API
 
-```bash
-# 1. Execute a goal (creates a stored run)
-curl -X POST http://localhost:8000/api/execute \
-  -H "Content-Type: application/json" \
-  -d '{"goal": "Audit REST API security", "provider": "openai"}'
+```powershell
+# Get full replay record
+Invoke-RestMethod http://localhost:8000/api/v2/observability/replay/run-abc12345
 
-# Response: {"run_id": "run-a1b2c3d4", ...}
+# Get event timeline
+Invoke-RestMethod http://localhost:8000/api/v2/observability/events/run-abc12345
 
-# 2. Replay the run with a different provider
-curl -X POST http://localhost:8000/api/replay \
-  -H "Content-Type: application/json" \
-  -d '{"original_run_id": "run-a1b2c3d4", "override_provider": "ollama"}'
-
-# Response: Side-by-side comparison of original vs replay metrics
+# Get cost breakdown
+Invoke-RestMethod http://localhost:8000/api/v2/observability/costs/run-abc12345
 ```
 
 ### Via Python
 
 ```python
+from backend.observability.tracker import EventTracker
+from backend.observability.tracer import CostTracker, AuditLog
 from backend.observability.replay import ReplayEngine
-from backend.observability.tracer import RunStore
 
-store = RunStore()
-engine = ReplayEngine(run_store=store, node_handler=your_handler)
+tracker = EventTracker()
+cost_tracker = CostTracker()
+audit_log = AuditLog()
 
-# Replay with provider override
-comparison = await engine.replay(
-    original_run_id="run-a1b2c3d4",
-    override_provider="ollama",
-)
-
-# Print side-by-side comparison
-print(comparison.summary_table())
+engine = ReplayEngine(tracker, cost_tracker, audit_log)
+record = engine.replay("run-abc12345")
+print(record.to_dict())
 ```
 
-### Replay Guarantees
+---
 
-| Aspect | Guarantee |
+## 9. Troubleshooting
+
+| Issue | Solution |
 | :--- | :--- |
-| **Graph structure** | Identical (same nodes, edges, system prompts) |
-| **Execution order** | Same topological order |
-| **Provider** | Can be overridden (hot-swap) |
-| **LLM output** | May differ (LLM non-determinism) |
-| **Cost comparison** | Accurate side-by-side delta |
-
-### SSE Streaming of Replayed Runs
-
-```bash
-# Stream events from a stored run in real-time
-curl -N http://localhost:8000/api/sse/runs/run-a1b2c3d4
-```
-
-Events stream with 50ms intervals, simulating real-time execution for replay visualisation.
-
----
-
-## 6. Troubleshooting
-
-### Common Issues
-
-| Issue | Cause | Fix |
-| :--- | :--- | :--- |
-| `ModuleNotFoundError: backend` | Not running from project root | `cd c:\hack` before running |
-| `OPENAI_API_KEY not set` | Missing `.env` file | Copy `.env.example` to `.env` and fill keys |
-| `Ollama connection refused` | Ollama not running | Start with `ollama serve` |
-| `Port 8000 already in use` | Another process on port | `netstat -ano \| findstr :8000` to find PID |
-| `npm install` fails | Node.js not installed or wrong version | Install Node.js 22+ LTS |
-| `next build` TypeScript errors | Dependency mismatch | Delete `node_modules` and re-run `npm install` |
-
-### Health Checks
-
-```powershell
-# Backend health
-curl http://localhost:8000/api/health
-
-# Frontend (should return HTML)
-curl http://localhost:3000
-
-# Ollama models
-ollama list
-```
-
----
-
-## 7. Data Provenance Reference
-
-All benchmark evaluation data is sourced from:
-
-| Dataset | Version | License | Access |
-| :--- | :--- | :--- | :--- |
-| AgentBench | v1.0 | MIT | [github.com/THUDM/AgentBench](https://github.com/THUDM/AgentBench) |
-| SWE-bench Lite | v1.0 | MIT | [github.com/princeton-nlp/SWE-bench](https://github.com/princeton-nlp/SWE-bench) |
-
-Full provenance metadata, SHA-256 hashes, and task definitions are in [`evaluation/DATA_PROVENANCE.md`](../evaluation/DATA_PROVENANCE.md).
+| `ModuleNotFoundError: langchain` | Run `pip install -r requirements.txt` |
+| Backend won't start | Check `.env` exists and has valid API key |
+| Frontend build fails | Run `cd frontend && npm install` |
+| Security tests fail | Ensure `backend/safety/` modules are intact |
+| SSE stream closes immediately | Check browser supports EventSource |
+| V1 routes warning on startup | Expected during V2 migration — safe to ignore |

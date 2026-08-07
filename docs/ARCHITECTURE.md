@@ -1,19 +1,20 @@
-# AE-03: System Architecture Document
+# AE-03: System Architecture Document (Directive V2)
 
-> **Version**: 1.0.0 · **Last Updated**: 2026-08-07 · **Status**: Complete (Modules 1–11)
+> **Version**: 2.0.0 · **Last Updated**: 2026-08-07 · **Status**: Complete (Modules 1–11)
 
 ---
 
 ## 1. Overview
 
-AE-03 is a production-grade multi-agent orchestration system that:
+AE-03 is a production-grade multi-agent orchestration system built on **LangGraph** that:
 
 1. Accepts **natural-language goals** from a user
-2. **Compiles** them into typed Directed Acyclic Graphs (DAGs) of specialised agents
-3. **Executes** the DAG with parallel fan-out, failure recovery, and safety governance
-4. Provides **real-time observability**, run **replay**, and **benchmark evaluation**
+2. **Compiles** them via `TaskCompiler` into validated `TaskGraph` DAGs of specialised agents
+3. **Executes** the DAG through `WorkflowEngine` (`StateGraph`) with parallel fan-out, failure recovery, and deny-by-default security
+4. Provides **real-time SSE observability**, run **replay**, HITL approvals, and **3-mode benchmark evaluation**
+5. Exposes **21 V2 REST API endpoints** covering execution, observability, security, and RAG
 
-The system is split into a **Control Plane** (compilation, governance, observability) and a **Data Plane** (agent execution, tool invocation, provider communication).
+The system is split into a **Control Plane** (compilation, governance, observability) and a **Data Plane** (LangGraph execution, tool invocation, provider communication).
 
 ---
 
@@ -22,22 +23,23 @@ The system is split into a **Control Plane** (compilation, governance, observabi
 ```mermaid
 graph TB
     subgraph "User Interface"
-        FE["Next.js Frontend<br/>(React Flow Canvas)"]
+        FE["Next.js Frontend<br/>(React Flow + SSE)"]
     end
 
     subgraph "Control Plane"
-        API["FastAPI REST + SSE<br/>(main.py, routes.py, sse.py)"]
-        COMP["Graph Compiler<br/>(graph_compiler.py)"]
-        SAFETY["Safety & Governance<br/>(policy_engine, interceptor,<br/>permissions, approval_gate)"]
-        OBS["Observability<br/>(tracker, tracer, replay)"]
-        EVAL["Evaluation Harness<br/>(benchmark, tasks, reporter)"]
+        API["FastAPI V2 REST + SSE<br/>(routes_v2.py — 21 endpoints)"]
+        COMP["TaskCompiler<br/>(task_compiler.py — 9 validations)"]
+        SAFETY["Safety & Governance<br/>(PolicyEngine, HITLGate,<br/>AgentCapabilities)"]
+        OBS["Observability<br/>(EventTracker, CostTracker,<br/>AuditLog, ReplayEngine)"]
+        EVAL["Evaluation Harness<br/>(3-mode BenchmarkRunner)"]
     end
 
     subgraph "Data Plane"
-        ENG["Execution Engine<br/>(executor, state_manager, recovery)"]
-        AGENTS["Agent Workers<br/>(worker_data, worker_code, worker_api)"]
-        PROV["Provider Router<br/>(OpenAI, Gemini, Ollama)"]
-        N8N["n8n Integration<br/>(webhook client)"]
+        ENG["LangGraph WorkflowEngine<br/>(StateGraph + AgentState)"]
+        AGENTS["Agent Workers<br/>(11 roles: planner, researcher,<br/>analyst, critic, verifier, etc.)"]
+        TOOLS["ToolRegistry<br/>(8 built-in tools)"]
+        PROV["ModelRouter<br/>(Google, OpenAI, Ollama)"]
+        RAG["RAG Pipeline<br/>(LangChain VectorStore)"]
     end
 
     FE -->|"REST + SSE"| API
@@ -45,11 +47,12 @@ graph TB
     API --> ENG
     API --> OBS
     API --> EVAL
-    COMP -->|"ExecutionGraph"| ENG
-    ENG -->|"AgentMessage"| AGENTS
+    COMP -->|"TaskGraph"| ENG
+    ENG -->|"AgentState"| AGENTS
     ENG -->|"pre/post hooks"| SAFETY
     AGENTS -->|"LLM calls"| PROV
-    AGENTS -->|"tool webhooks"| N8N
+    AGENTS -->|"tool calls"| TOOLS
+    AGENTS -->|"retrieval"| RAG
     ENG -->|"TraceEvents"| OBS
     PROV -->|"fallback chain"| PROV
 ```
@@ -60,316 +63,241 @@ graph TB
 
 ### Module Dependency Matrix
 
-| Module | Package | Depends On | Depended By |
+| Module | Package | Key Classes | Depends On |
 | :--- | :--- | :--- | :--- |
-| **M1** Scaffolding | `config`, `schemas/` | — | All modules |
-| **M2** Providers | `providers/` | M1 | M3, M4, M5, M10 |
-| **M3** Compiler | `compiler/` | M1, M2 | M5, M10 |
-| **M4** n8n & Workers | `integrations/`, `agents/` | M1, M2 | M5 |
-| **M5** Execution Engine | `engine/` | M1, M3, M4 | M6, M7, M8, M10 |
-| **M6** Safety & HITL | `safety/` | M1, M5 | M7, M10 |
-| **M7** Observability | `observability/` | M1, M5 | M8, M10 |
-| **M8** Evaluation | `evaluation/` | M1, M5, M7 | M10 |
-| **M9** Frontend | `frontend/` | — | M10 |
-| **M10** E2E Integration | `api/`, `main.py`, `scripts/` | All | M11 |
-| **M11** Documentation | `docs/` | All | — |
+| **M1** Config & Schemas | `config.py`, `schemas/` | `AppSettings`, `AgentRole`, `Task`, `TaskGraph` | — |
+| **M2** Model Router | `models/` | `ModelRouter`, `ProviderConfig` | M1 |
+| **M3** Tool Registry | `tools/` | `ToolRegistry`, `ToolConfig` | M1 |
+| **M4** Task Compiler | `graph/task_compiler.py` | `TaskCompiler`, `ValidationResult` | M1, M2, M3 |
+| **M5** Workflow Engine | `graph/workflow.py`, `graph/agent_state.py` | `WorkflowEngine`, `AgentState` (21 fields), `ScratchpadManager` | M1, M4 |
+| **M6** Policy & HITL | `safety/` | `PolicyEngine` (6 rules), `HITLGate`, `AgentCapability` (11 roles) | M1 |
+| **M7** Observability | `observability/` | `EventTracker` (25 types), `CostTracker`, `AuditLog`, `ReplayEngine` | M1 |
+| **M8** API Endpoints | `api/routes_v2.py` | 21 V2 REST endpoints + SSE | M1-M7 |
+| **M9** Frontend | `frontend/` | React Flow + V2 API client + SSE | M8 |
+| **M10** Security Tests | `tests/test_security_suite.py` | 50 tests, 18 categories | M1-M8 |
+| **M11** Documentation | `docs/` | ARCHITECTURE, THREAT_MODEL, REPRODUCIBILITY | All |
 
-### File Manifest
+### File Manifest (Post-Migration)
 
 ```
 c:\hack/
-├── .env.example                          # API key template
-├── requirements.txt                      # Python dependencies
 ├── backend/
-│   ├── __init__.py
-│   ├── main.py                           # FastAPI app entry point
-│   ├── config.py                         # Environment vault (pydantic-settings)
+│   ├── config.py                          # AppSettings (Pydantic)
+│   ├── main.py                            # FastAPI lifespan + V2 router
 │   ├── api/
-│   │   ├── routes.py                     # 10 REST endpoints
-│   │   └── sse.py                        # 2 SSE streaming endpoints
-│   ├── schemas/
-│   │   ├── contracts.py                  # Core Pydantic models
-│   │   └── artifacts.py                  # Trace, report, benchmark models
-│   ├── providers/
-│   │   ├── base.py                       # Abstract LLM provider
-│   │   ├── openai_provider.py            # OpenAI GPT integration
-│   │   ├── gemini_provider.py            # Google Gemini integration
-│   │   ├── ollama_provider.py            # Local Ollama integration
-│   │   └── router.py                     # Provider router + fallback chain
-│   ├── compiler/
-│   │   ├── prompt_templates.py           # System prompt templates
-│   │   ├── graph_compiler.py             # Goal → DAG compiler
-│   │   └── validator.py                  # Kahn's algorithm + cycle detection
-│   ├── integrations/
-│   │   └── n8n_client.py                 # n8n webhook HTTP client
-│   ├── agents/
-│   │   ├── worker_data.py                # Researcher agent
-│   │   ├── worker_code.py                # Code executor agent
-│   │   └── worker_api.py                 # API integration agent
-│   ├── engine/
-│   │   ├── executor.py                   # Async DAG executor
-│   │   ├── state_manager.py              # SharedMemory + TTL scratch
-│   │   └── recovery.py                   # Retry + compensation
+│   │   ├── routes_v2.py                   # 21 V2 REST endpoints
+│   │   └── routes.py / sse.py             # V1 (deprecated, graceful fallback)
+│   ├── graph/
+│   │   ├── agent_state.py                 # AgentState TypedDict (21 fields)
+│   │   ├── task_compiler.py               # TaskCompiler (9 validations)
+│   │   └── workflow.py                    # WorkflowEngine (LangGraph StateGraph)
+│   ├── models/
+│   │   └── model_router.py                # ModelRouter (Google, OpenAI, Ollama)
+│   ├── tools/
+│   │   └── tool_registry.py               # ToolRegistry (8 built-in tools)
 │   ├── safety/
-│   │   ├── policy_engine.py              # Standalone policy evaluator
-│   │   ├── permissions.py                # Permission models + defaults
-│   │   ├── interceptor.py                # Pre-execution middleware
-│   │   └── approval_gate.py              # HITL approval gate
+│   │   ├── agent_config.py                # AgentCapability matrix (11 roles)
+│   │   ├── policy_engine.py               # PolicyEngine (6-rule deny chain)
+│   │   ├── hitl_gate.py                   # HITLGate (LangGraph interrupt())
+│   │   └── permissions.py                 # Role permissions
 │   ├── observability/
-│   │   ├── tracker.py                    # Token/cost tracker
-│   │   ├── tracer.py                     # Event trace logger + RunStore
-│   │   └── replay.py                     # Run replay engine
+│   │   ├── tracker.py                     # EventTracker (25 event types)
+│   │   ├── tracer.py                      # CostTracker + AuditLog
+│   │   └── replay.py                      # ReplayEngine
+│   ├── rag/
+│   │   ├── pipeline.py                    # RAGPipeline (LangChain)
+│   │   └── vector_store.py                # VectorStore (ChromaDB/FAISS)
 │   ├── evaluation/
-│   │   ├── tasks.py                      # Task loader from DATA_PROVENANCE
-│   │   ├── benchmark.py                  # 3-mode benchmark runner
-│   │   └── reporter.py                   # Marginal value report
+│   │   ├── benchmark.py                   # BenchmarkRunner (3 modes)
+│   │   ├── reporter.py                    # BenchmarkReporter
+│   │   └── tasks.py                       # Task loader (DATA_PROVENANCE.md)
+│   ├── schemas/
+│   │   ├── contracts.py                   # 20+ Pydantic models
+│   │   └── artifacts.py                   # RunReport, BenchmarkResult
 │   └── tests/
-│       ├── test_e2e_mvd.py               # E2E MVD test suite
-│       └── inject_failure.py             # Failure injection utilities
+│       └── test_security_suite.py         # 50 tests, 18 categories
 ├── frontend/
-│   ├── app/
-│   │   ├── globals.css                   # Premium dark design system
-│   │   ├── layout.tsx                    # Root layout
-│   │   └── page.tsx                      # Main orchestrator page
+│   ├── app/page.tsx                       # V2 API + SSE + demo fallback
+│   ├── lib/api.ts                         # V2 API client (typed)
 │   └── components/
-│       ├── GraphCanvas.tsx               # React Flow DAG canvas
-│       ├── MetricsPanel.tsx              # Live metrics panel
-│       └── ApprovalModal.tsx             # HITL approval modal
-├── evaluation/
-│   └── DATA_PROVENANCE.md                # Benchmark data sources + tasks
-├── docs/
-│   ├── ARCHITECTURE.md                   # This document
-│   ├── THREAT_MODEL.md                   # Security threat model
-│   └── REPRODUCIBILITY.md               # Reproduction guide
+│       ├── GraphCanvas.tsx                # React Flow (11 role icons)
+│       ├── MetricsPanel.tsx               # Live metrics + event log
+│       └── ApprovalModal.tsx              # HITL approval UI
 ├── scripts/
-│   └── run_demo.ps1                      # Single-command demo launcher
-└── n8n_workflows/
-    ├── worker_code_workflow.json          # n8n code executor workflow
-    ├── worker_data_workflow.json          # n8n data researcher workflow
-    └── worker_api_workflow.json           # n8n API integration workflow
+│   └── run_demo.ps1                       # Single-command launcher
+└── docs/
+    ├── ARCHITECTURE.md                    # This document
+    ├── THREAT_MODEL.md                    # 15 threat categories
+    └── REPRODUCIBILITY.md                 # Setup & reproduction guide
 ```
 
 ---
 
-## 4. Data Flow — End-to-End Request Lifecycle
+## 4. Data Flow
+
+### Goal → Execution → Report Pipeline
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant FE as Frontend
-    participant API as FastAPI
-    participant Compiler as GraphCompiler
-    participant Engine as AsyncDAGExecutor
-    participant Safety as PolicyEngine
-    participant Worker as AgentWorker
-    participant LLM as ProviderRouter
-    participant Obs as Tracer/Tracker
+    participant U as User
+    participant API as FastAPI V2
+    participant TC as TaskCompiler
+    participant PE as PolicyEngine
+    participant WE as WorkflowEngine
+    participant MR as ModelRouter
+    participant ET as EventTracker
+    participant SSE as SSE Stream
 
-    User->>FE: Enter goal text
-    FE->>API: POST /api/execute {goal, provider}
-    API->>Compiler: compile_goal(goal)
-    Compiler->>LLM: Decompose goal → agent plan
-    LLM-->>Compiler: JSON DAG spec
-    Compiler-->>API: ExecutionGraph (nodes + edges)
+    U->>API: POST /api/v2/run {goal}
+    API->>TC: compile_goal(goal)
+    TC->>MR: Generate plan (LLM)
+    MR-->>TC: Structured plan
+    TC->>TC: validate() — 9 checks
+    TC-->>API: TaskGraph
+    API->>WE: execute(goal, run_id)
+    WE->>ET: emit(RUN_CREATED)
+    ET-->>SSE: SSE event
 
-    API->>Engine: run(graph, handler)
-    
-    loop For each topological layer
-        Engine->>Engine: Identify ready nodes (in-degree = 0)
-        par Parallel execution
-            Engine->>Safety: pre_execution_check(node)
-            Safety-->>Engine: ALLOW / DENY
-            Engine->>Worker: execute(node_id, config, input)
-            Worker->>LLM: call(prompt, model)
-            LLM-->>Worker: completion
-            Worker-->>Engine: output payload
-            Engine->>Obs: emit(TraceEvent)
-        end
+    loop For each task in topological order
+        WE->>PE: evaluate_tool_request()
+        PE-->>WE: allow/deny
+        WE->>MR: ainvoke_text()
+        MR-->>WE: response
+        WE->>ET: emit(AGENT_COMPLETED)
+        ET-->>SSE: SSE event
     end
 
-    Engine-->>API: ExecutionResult
-    API-->>FE: {run_id, metrics, final_output}
-    FE->>API: GET /api/sse/runs/{run_id}
-    API-->>FE: SSE event stream
+    WE-->>API: Final AgentState
+    API->>ET: emit(RUN_COMPLETED)
+    U->>API: GET /api/v2/run/{id}/report
+    API-->>U: RunReportResponse
 ```
 
 ---
 
-## 5. Agent Role Taxonomy
+## 5. Agent Architecture
 
-AE-03 defines **8 specialised agent roles**, each with distinct responsibilities and tool permissions:
+### 11 Directive V2 Agent Roles
 
-| Role | Responsibility | Allowed Tools | Example |
+| Role | LLM | Network | Code Exec | RAG | Tools | Purpose |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| ORCHESTRATOR | ✅ | ❌ | ❌ | ❌ | ❌ | Top-level coordination |
+| PLANNER | ✅ | ❌ | ❌ | ❌ | ❌ | Goal decomposition |
+| RESEARCHER | ✅ | ✅ | ❌ | ✅ | ✅ | Information gathering |
+| RAG | ❌ | ❌ | ❌ | ✅ | ✅ | Document retrieval |
+| TOOL_EXECUTION | ✅ | ✅ | ✅ | ❌ | ✅ | Tool invocation |
+| ANALYST | ✅ | ✅ | ❌ | ✅ | ✅ | Data analysis |
+| CRITIC | ✅ | ❌ | ❌ | ❌ | ❌ | Quality review |
+| VERIFIER | ✅ | ❌ | ❌ | ❌ | ❌ | Output verification |
+| SECURITY | ❌ | ❌ | ❌ | ❌ | ❌ | Deterministic policy |
+| REPORTER | ✅ | ❌ | ❌ | ❌ | ❌ | Report generation |
+| VISUALIZATION | ✅ | ❌ | ❌ | ❌ | ❌ | Chart/diagram creation |
+
+### AgentState (21 Fields)
+
+The `AgentState` TypedDict flows through every LangGraph node:
+
+| Field | Type | Purpose |
+| :--- | :--- | :--- |
+| `run_id` | `str` | Unique execution identifier |
+| `goal` | `str` | Original user goal |
+| `tasks` | `list[dict]` | Compiled task nodes |
+| `current_task` | `str` | Active task ID |
+| `agent_outputs` | `dict` | Per-agent output accumulator |
+| `artifacts` | `list[dict]` | Generated file artifacts |
+| `errors` | `list[str]` | Error accumulator |
+| `status` | `str` | Run status |
+| `metrics` | `dict` | Cost/token/latency metrics |
+| `scratchpad` | `dict` | TTL-based working memory |
+| `verification_state` | `dict` | Verification results |
+| + 10 more | various | Security, RAG, HITL state |
+
+---
+
+## 6. Security Architecture
+
+### PolicyEngine — 6-Rule Deny Chain
+
+All operations pass through the stateless `PolicyEngine` before execution:
+
+1. **DENY** if agent role not in `AGENT_CAPABILITIES` matrix
+2. **DENY** if tool not in role's `allowed_tools` list
+3. **DENY** if risk level exceeds role's `max_risk_level`
+4. **DENY** if file path matches sensitive patterns (`.env`, `.git`, `.ssh`, `private_key`)
+5. **DENY** if network URL matches private/internal patterns (`localhost`, `10.x`, `192.168.x`)
+6. **DENY** if content matches prompt injection patterns (6 regex categories)
+
+If no rule denies, the operation is **ALLOWED**.
+
+### HITL Gate
+
+High-risk operations trigger `interrupt()` in LangGraph, generating an `ApprovalRequest` payload sent to the frontend via SSE. Execution pauses until the human operator approves, rejects, or requests changes.
+
+---
+
+## 7. Observability Stack
+
+| Component | Events | Storage | Access |
 | :--- | :--- | :--- | :--- |
-| **PLANNER** | Decomposes goal into sub-tasks | — | "Split into research + execution" |
-| **RESEARCHER** | Gathers information from data sources | `web_search`, `db_query` | "Find API docs for Stripe" |
-| **EXECUTOR** | Executes code, transforms data | `code_execute`, `file_write` | "Run the data pipeline" |
-| **VERIFIER** | Validates outputs against schemas | `validate_output` | "Check response matches schema" |
-| **REPORTER** | Synthesises final deliverable | `format_report` | "Generate markdown report" |
-| **CRITIC** | Reviews and suggests improvements | — | "The code lacks error handling" |
-| **ROUTER** | Dynamic dispatch to sub-specialists | — | "Route to code vs data worker" |
-| **SUB_GRAPH** | Encapsulates a nested sub-workflow | (delegates to child graph) | "Run auth audit sub-workflow" |
-
-### Role Interaction Pattern
-
-```mermaid
-graph LR
-    P["PLANNER"] --> R["RESEARCHER"]
-    P --> E["EXECUTOR"]
-    R --> V["VERIFIER"]
-    E --> V
-    V --> C["CRITIC"]
-    C -->|"retry"| E
-    V --> REP["REPORTER"]
-    P --> SG["SUB_GRAPH"]
-    SG -->|"nested DAG"| V
-```
+| `EventTracker` | 25 event types | In-memory + SSE listeners | `GET /api/v2/observability/events/{id}` |
+| `CostTracker` | Per-call cost records | In-memory aggregation | `GET /api/v2/observability/costs/{id}` |
+| `AuditLog` | Security decisions, violations | Append-only list | `GET /api/v2/policy/audit` |
+| `ReplayEngine` | Reconstructed execution traces | Aggregated from above | `GET /api/v2/observability/replay/{id}` |
 
 ---
 
-## 6. Provider Abstraction Layer
+## 8. API Surface (21 V2 Endpoints)
 
-### Multi-LLM Fallback Chain
-
-```mermaid
-graph LR
-    REQ["LLM Request"] --> R["ProviderRouter"]
-    R -->|"primary"| O["OpenAI<br/>(gpt-4o)"]
-    O -->|"failure"| G["Gemini<br/>(gemini-2.0-flash)"]
-    G -->|"failure"| L["Ollama<br/>(llama3.2, local)"]
-    L -->|"all failed"| ERR["ProviderError"]
-```
-
-**Key features:**
-- **Automatic fallback**: If the primary provider fails (timeout, rate limit, 500), the router tries the next in the chain
-- **Per-provider cost tracking**: Each call records prompt tokens, completion tokens, and USD cost
-- **Usage stats**: Call count, failure count, total cost per provider
-- **Model override**: Any endpoint can override the default model per request
-
----
-
-## 7. n8n Integration Surface
-
-### Webhook Bus Topology
-
-```mermaid
-graph TB
-    subgraph "AE-03 Backend"
-        WD["worker_data.py"]
-        WC["worker_code.py"]
-        WA["worker_api.py"]
-        N8N["n8nWebhookClient"]
-    end
-
-    subgraph "n8n Cloud"
-        WH_D["worker-data-hook"]
-        WH_C["worker-code-hook"]
-        WH_A["worker-api-hook"]
-    end
-
-    WD -->|"POST"| N8N
-    WC -->|"POST"| N8N
-    WA -->|"POST"| N8N
-    N8N -->|"HTTPS"| WH_D
-    N8N -->|"HTTPS"| WH_C
-    N8N -->|"HTTPS"| WH_A
-```
-
-**Payload contract:** All webhook calls use `WebhookPayload` (Pydantic model) containing `run_id`, `node_id`, `action`, `params`, and `metadata`.
-
----
-
-## 8. Execution Engine Internals
-
-### DAG Traversal Algorithm
-
-1. **Topological sort** via Kahn's algorithm (cycle detection)
-2. **Layer-by-layer execution**: Nodes with in-degree 0 form a layer
-3. **Parallel fan-out**: All nodes within a layer run concurrently via `asyncio.gather()`
-4. **Join synchronisation**: A node waits until all parent outputs are available
-5. **Sub-graph delegation**: `SUB_GRAPH` nodes spawn a child `AsyncDAGExecutor`
-
-### Retry & Compensation
-
-| Mechanism | Trigger | Action |
+| Method | Path | Purpose |
 | :--- | :--- | :--- |
-| **Exponential backoff** | Node failure (retryable) | Retry up to `max_retries` with `base_delay * 2^attempt` |
-| **Compensation** | Node failure (non-retryable) | Execute registered compensation handler for the node |
-| **Circuit breaker** | Consecutive failures > threshold | Mark node as FAILED, skip downstream |
-
-### TTL Memory Eviction
-
-`ExecutionState.scratch_memory` uses time-based eviction:
-- Default TTL: 300 seconds
-- Entries are evicted on read if expired
-- Prevents unbounded memory growth in long-running executions
-
----
-
-## 9. Security Architecture
-
-### Defence-in-Depth Layers
-
-```mermaid
-graph TB
-    REQ["Incoming Request"] --> L1["Layer 1: CORS Middleware"]
-    L1 --> L2["Layer 2: PolicyEngine<br/>(tool allow-list, cost budget)"]
-    L2 --> L3["Layer 3: Interceptor<br/>(pre/post execution hooks)"]
-    L3 --> L4["Layer 4: ApprovalGate<br/>(HITL for sensitive ops)"]
-    L4 --> EXEC["Agent Execution"]
-```
-
-| Layer | Component | What it checks |
-| :--- | :--- | :--- |
-| **1** | CORS Middleware | Origin whitelist (localhost:3000, 3001, 8000) |
-| **2** | PolicyEngine | Tool in `allowed_tools`, cost < `max_cost_per_run`, depth < `max_graph_depth` |
-| **3** | Interceptor | Pre-execution: validate inputs; Post-execution: validate outputs |
-| **4** | ApprovalGate | Sensitive tools require human approval before execution |
+| `POST` | `/api/v2/run` | Start async execution |
+| `GET` | `/api/v2/run/{id}/stream` | SSE event stream |
+| `GET` | `/api/v2/run/{id}/status` | Run status |
+| `GET` | `/api/v2/run/{id}/report` | Final report |
+| `GET` | `/api/v2/run/{id}/trace` | Full execution trace |
+| `GET` | `/api/v2/run/{id}/artifacts` | Run artifacts |
+| `POST` | `/api/v2/run/{id}/cancel` | Cancel run |
+| `POST` | `/api/v2/run/{id}/approve` | HITL approval |
+| `POST` | `/api/v2/workflow/approve/{id}` | Bulk approve |
+| `POST` | `/api/v2/workflow/reject/{id}` | Bulk reject |
+| `POST` | `/api/v2/workflow/request-changes/{id}` | Request changes |
+| `POST` | `/api/v2/documents/upload` | Document upload (RAG) |
+| `POST` | `/api/v2/rag/query` | RAG query |
+| `GET` | `/api/v2/runs` | List all runs |
+| `GET` | `/api/v2/tools` | List tools |
+| `GET` | `/api/v2/agents` | Agent capabilities |
+| `GET` | `/api/v2/hitl/pending` | Pending approvals |
+| `GET` | `/api/v2/policy/audit` | Audit log |
+| `GET` | `/api/v2/observability/replay/{id}` | Replay record |
+| `GET` | `/api/v2/observability/events/{id}` | Event timeline |
+| `GET` | `/api/v2/observability/costs/{id}` | Cost breakdown |
 
 ---
 
-## 10. API Surface Summary
+## 9. Evaluation Harness
 
-### REST Endpoints (10)
+Three execution modes for marginal value comparison:
 
-| Method | Path | Description |
+| Mode | Description | Key Metric |
 | :--- | :--- | :--- |
-| GET | `/api/health` | Health check |
-| POST | `/api/compile` | Compile goal → DAG |
-| POST | `/api/execute` | Compile + execute |
-| GET | `/api/runs` | List runs |
-| GET | `/api/runs/{id}` | Get run detail |
-| GET | `/api/runs/{id}/export` | Export trace JSON |
-| POST | `/api/replay` | Replay with hot-swap |
-| POST | `/api/approve` | HITL approval |
-| GET | `/api/providers` | List providers |
-| GET | `/api/benchmark/summary` | Benchmark tasks |
+| **Single Prompt** | One LLM call, no orchestration | Baseline cost/latency |
+| **Static Multi-Agent** | Template-based DAG via `compile_from_template()` | Handoff validity |
+| **AE-03 Dynamic** | Full `WorkflowEngine` pipeline | Success rate, recovery |
 
-### SSE Endpoints (2)
-
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| GET | `/api/sse/runs/{id}` | Stream stored run events |
-| GET | `/api/sse/demo` | Simulated demo stream |
+Comparison metrics: success rate, avg cost, avg latency, avg tokens, handoff validity, recovery rate, security violations.
 
 ---
 
-## 11. Technology Stack
+## 10. Migration from V1
 
-| Layer | Technology | Version |
+| V1 Component | V2 Replacement | Status |
 | :--- | :--- | :--- |
-| **Backend** | Python | 3.13 |
-| | FastAPI | ≥ 0.115 |
-| | Pydantic | ≥ 2.10 |
-| | uvicorn | ≥ 0.30 |
-| | httpx | ≥ 0.27 |
-| | sse-starlette | ≥ 2.0 |
-| **LLM Providers** | OpenAI SDK | ≥ 1.50 |
-| | Google Generative AI | ≥ 0.8 |
-| | Ollama (local) | latest |
-| **Frontend** | Next.js | 16.3.0 |
-| | React | 19.2.8 |
-| | @xyflow/react | 12.11.2 |
-| | lucide-react | 1.29.0 |
-| | TypeScript | 5.x |
-| **Integration** | n8n Cloud | webhooks |
+| `graph_compiler.py` | `task_compiler.py` (9 validations) | ✅ |
+| `executor.py` / `state_manager.py` | `workflow.py` (LangGraph StateGraph) | ✅ |
+| Custom `ExecutionGraph` | `TaskGraph` (Pydantic) | ✅ |
+| `interceptor.py` / `permissions.py` | `PolicyEngine` (6-rule chain) | ✅ |
+| `approval_gate.py` | `HITLGate` (LangGraph `interrupt()`) | ✅ |
+| `tracker.py` (V1) | `EventTracker` (25 types + SSE) | ✅ |
+| `tracer.py` (V1) | `CostTracker` + `AuditLog` | ✅ |
+| V1 routes (`routes.py`, `sse.py`) | `routes_v2.py` (21 endpoints) | ✅ |
+| Simulated frontend | Real V2 API + SSE binding | ✅ |
