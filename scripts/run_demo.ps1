@@ -1,18 +1,18 @@
 <# 
-  AE-03 Orchestrator — Single-Command Demo Launcher
+  AE-03 Orchestrator — Single-Command Demo Launcher (Directive V2)
   
   Usage:
     .\scripts\run_demo.ps1
   
   Starts both the FastAPI backend (port 8000) and Next.js frontend (port 3000),
-  waits for health checks, then prints the dashboard URL.
+  waits for health checks, then prints all V2 API endpoints.
 #>
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  AE-03 Orchestrator — Demo Launcher" -ForegroundColor Cyan
+Write-Host "  AE-03 Orchestrator — Demo Launcher (Directive V2)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -83,10 +83,31 @@ Write-Host ""
 Write-Host "[4/4] Services launched!" -ForegroundColor Green
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Dashboard:  http://localhost:3000" -ForegroundColor White
-Write-Host "  API Docs:   http://localhost:8000/api/docs" -ForegroundColor White
-Write-Host "  Health:     http://localhost:8000/api/health" -ForegroundColor White
-Write-Host "  SSE Demo:   http://localhost:8000/api/sse/demo" -ForegroundColor White
+Write-Host "  Dashboard:       http://localhost:3000" -ForegroundColor White
+Write-Host "  API Docs:        http://localhost:8000/api/docs" -ForegroundColor White
+Write-Host "  Health:          http://localhost:8000/api/health" -ForegroundColor White
+Write-Host "" -ForegroundColor White
+Write-Host "  V2 API Endpoints:" -ForegroundColor DarkYellow
+Write-Host "    POST /api/v2/run                   — Start execution" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/run/{id}/stream       — SSE event stream" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/run/{id}/status        — Run status" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/run/{id}/report        — Final report" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/run/{id}/trace         — Full trace" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/run/{id}/artifacts     — Run artifacts" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/run/{id}/cancel        — Cancel run" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/run/{id}/approve       — HITL approval" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/workflow/approve/{id}  — Bulk approve" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/workflow/reject/{id}   — Bulk reject" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/documents/upload       — Upload document" -ForegroundColor DarkGray
+Write-Host "    POST /api/v2/rag/query              — RAG query" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/runs                   — List runs" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/tools                  — List tools" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/agents                 — Agent capabilities" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/hitl/pending           — Pending approvals" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/policy/audit           — Security audit" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/observability/replay   — Run replay" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/observability/events   — Run events" -ForegroundColor DarkGray
+Write-Host "    GET  /api/v2/observability/costs    — Cost breakdown" -ForegroundColor DarkGray
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Press Ctrl+C to stop both services." -ForegroundColor DarkGray

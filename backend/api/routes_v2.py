@@ -458,3 +458,189 @@ async def get_pending_approvals():
         "count": len(pending),
         "stats": _hitl_gate.get_stats(),
     }
+
+
+# ── POST /api/v2/run/{run_id}/cancel — Cancel Run ───────────────────
+
+
+@router.post("/run/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Cancel a running execution."""
+    state = _active_runs.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    if state.get("status") not in ("running", "started", "pending"):
+        raise HTTPException(status_code=409, detail=f"Run '{run_id}' is not cancellable (status={state.get('status')}).")
+
+    state["status"] = "cancelled"
+    _event_tracker.emit_run_completed(run_id, status="cancelled")
+    _audit_log.log_workflow_event(run_id, "RUN_CANCELLED")
+
+    return {"run_id": run_id, "status": "cancelled", "message": f"Run '{run_id}' cancelled."}
+
+
+# ── GET /api/v2/run/{run_id}/trace — Full Trace ─────────────────────
+
+
+@router.get("/run/{run_id}/trace")
+async def get_run_trace(run_id: str):
+    """Get the full execution trace for a run."""
+    events = _event_tracker.get_events(run_id)
+    timeline = _event_tracker.get_timeline(run_id)
+    costs = _cost_tracker.get_run_summary(run_id)
+    audit = _audit_log.get_entries(run_id)
+
+    return {
+        "run_id": run_id,
+        "events": events,
+        "timeline": timeline,
+        "cost_summary": costs,
+        "audit_entries": audit,
+        "event_count": len(events),
+    }
+
+
+# ── GET /api/v2/run/{run_id}/artifacts — Run Artifacts ───────────────
+
+
+@router.get("/run/{run_id}/artifacts")
+async def get_run_artifacts(run_id: str):
+    """Get all artifacts produced by a run."""
+    state = _active_runs.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+
+    artifacts = state.get("artifacts", [])
+    agent_outputs = state.get("agent_outputs", {})
+
+    return {
+        "run_id": run_id,
+        "artifacts": artifacts,
+        "agent_outputs": {
+            k: str(v)[:1000] for k, v in agent_outputs.items()
+        },
+        "total": len(artifacts),
+    }
+
+
+# ── POST /api/v2/workflow/approve/{run_id} — Shortcut Approve ────────
+
+
+@router.post("/workflow/approve/{run_id}")
+async def workflow_approve(run_id: str):
+    """Approve all pending HITL requests for a run."""
+    pending = _hitl_gate.get_pending_for_run(run_id)
+    if not pending:
+        return {"run_id": run_id, "message": "No pending approvals.", "resolved": 0}
+
+    resolved = 0
+    for approval in pending:
+        _hitl_gate.resolve(approval.approval_id, ApprovalAction.APPROVE, "Bulk approved")
+        _event_tracker.emit_approved(run_id, approval.approval_id)
+        _audit_log.log_approval(run_id, approval.approval_id, "approve", agent_role=approval.agent_role.value)
+        resolved += 1
+
+    return {"run_id": run_id, "message": f"Approved {resolved} request(s).", "resolved": resolved}
+
+
+# ── POST /api/v2/workflow/reject/{run_id} — Shortcut Reject ──────────
+
+
+@router.post("/workflow/reject/{run_id}")
+async def workflow_reject(run_id: str, reason: str = "Rejected via API"):
+    """Reject all pending HITL requests for a run."""
+    pending = _hitl_gate.get_pending_for_run(run_id)
+    if not pending:
+        return {"run_id": run_id, "message": "No pending approvals.", "resolved": 0}
+
+    resolved = 0
+    for approval in pending:
+        _hitl_gate.resolve(approval.approval_id, ApprovalAction.REJECT, reason)
+        _event_tracker.emit_rejected(run_id, approval.approval_id, reason)
+        _audit_log.log_approval(run_id, approval.approval_id, "reject", agent_role=approval.agent_role.value, reason=reason)
+        resolved += 1
+
+    return {"run_id": run_id, "message": f"Rejected {resolved} request(s).", "resolved": resolved}
+
+
+# ── POST /api/v2/workflow/request-changes/{run_id} — Request Changes ─
+
+
+@router.post("/workflow/request-changes/{run_id}")
+async def workflow_request_changes(run_id: str, reason: str = "Changes requested"):
+    """Request changes for all pending HITL requests for a run."""
+    pending = _hitl_gate.get_pending_for_run(run_id)
+    if not pending:
+        return {"run_id": run_id, "message": "No pending approvals.", "resolved": 0}
+
+    resolved = 0
+    for approval in pending:
+        _hitl_gate.resolve(approval.approval_id, ApprovalAction.REQUEST_CHANGES, reason)
+        _audit_log.log_approval(run_id, approval.approval_id, "request_changes", agent_role=approval.agent_role.value, reason=reason)
+        resolved += 1
+
+    return {"run_id": run_id, "message": f"Requested changes for {resolved} request(s).", "resolved": resolved}
+
+
+# ── POST /api/v2/documents/upload — Document Upload ──────────────────
+
+
+class DocumentUploadRequest(BaseModel):
+    """Request body for document upload."""
+    content: str = Field(description="Document text content.")
+    filename: str = Field(default="uploaded.txt", description="Filename.")
+    workspace_id: str = Field(default="default_workspace")
+
+
+@router.post("/documents/upload")
+async def upload_document(request: DocumentUploadRequest):
+    """Upload a document for RAG indexing."""
+    # Scan content for injection
+    decision = _policy_engine.scan_content(request.content, source=f"upload:{request.filename}")
+    if decision.verdict.value == "deny":
+        _audit_log.log_injection_detected(
+            "", decision.rule_matched, source=request.filename,
+            matched_text=decision.reason[:100],
+        )
+        raise HTTPException(status_code=403, detail=f"Content rejected: {decision.reason}")
+
+    # Index into RAG
+    try:
+        from backend.rag.pipeline import RAGPipeline
+        pipeline = RAGPipeline()
+        doc_id = pipeline.add_document(request.content, metadata={
+            "filename": request.filename,
+            "workspace_id": request.workspace_id,
+            "source": "upload",
+        })
+        return {"status": "indexed", "doc_id": doc_id, "filename": request.filename}
+    except Exception as e:
+        return {"status": "accepted", "message": f"Document accepted (RAG indexing deferred): {e}"}
+
+
+# ── POST /api/v2/rag/query — RAG Query ──────────────────────────────
+
+
+class RAGQueryRequest(BaseModel):
+    """Request body for RAG query."""
+    query: str = Field(description="Search query.")
+    workspace_id: str = Field(default="default_workspace")
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+@router.post("/rag/query")
+async def rag_query(request: RAGQueryRequest):
+    """Query the RAG pipeline for relevant documents."""
+    # Scan query for injection
+    decision = _policy_engine.scan_content(request.query, source="rag_query")
+    if decision.verdict.value == "deny":
+        raise HTTPException(status_code=403, detail=f"Query rejected: {decision.reason}")
+
+    try:
+        from backend.rag.pipeline import RAGPipeline
+        pipeline = RAGPipeline()
+        results = pipeline.query(request.query, top_k=request.top_k)
+        return {"query": request.query, "results": results, "count": len(results)}
+    except Exception as e:
+        return {"query": request.query, "results": [], "count": 0, "error": str(e)}
+

@@ -72,13 +72,19 @@ const STATUS_BG: Record<NodeStatus, string> = {
 
 /* ── Role → Icon Map ──────────────────────────────────────────────────── */
 const ROLE_ICONS: Record<string, React.ReactNode> = {
+  ORCHESTRATOR: <Workflow size={16} />,
   PLANNER: <Brain size={16} />,
   RESEARCHER: <Search size={16} />,
+  RAG: <Search size={16} />,
+  TOOL_EXECUTION: <Code2 size={16} />,
   EXECUTOR: <Code2 size={16} />,
-  VERIFIER: <ShieldCheck size={16} />,
-  REPORTER: <FileText size={16} />,
-  SUB_GRAPH: <GitBranch size={16} />,
   ANALYST: <Bot size={16} />,
+  CRITIC: <ShieldCheck size={16} />,
+  VERIFIER: <ShieldCheck size={16} />,
+  SECURITY: <ShieldCheck size={16} />,
+  REPORTER: <FileText size={16} />,
+  VISUALIZATION: <GitBranch size={16} />,
+  SUB_GRAPH: <GitBranch size={16} />,
 };
 
 /* ── Custom Agent Node ─────────────────────────────────────────────────── */

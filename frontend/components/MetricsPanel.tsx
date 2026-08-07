@@ -43,6 +43,9 @@ const EVENT_COLORS: Record<string, string> = {
   APPROVAL: "var(--status-approval)",
   APPROVED: "var(--accent-emerald)",
   ERROR: "var(--status-failed)",
+  TOOL: "var(--accent-secondary)",
+  SECURITY: "var(--status-retrying)",
+  RETRY: "var(--status-retrying)",
 };
 
 /* ── Metrics Panel Component ──────────────────────────────────────────── */
