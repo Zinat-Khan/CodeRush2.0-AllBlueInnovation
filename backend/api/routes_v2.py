@@ -738,11 +738,30 @@ async def generate_llm_report(request: ReportGenerateRequest):
                 f"Q: {q.get('query')}\nA: {q.get('answer')}" for q in request.qa_history
             )
 
+        # Fetch real-time web research via Tavily API if configured
+        web_search_context = ""
+        if settings.tavily_api_key:
+            try:
+                import requests
+                res = requests.post(
+                    "https://api.tavily.com/search",
+                    json={"api_key": settings.tavily_api_key, "query": request.goal, "max_results": 5},
+                    timeout=5,
+                )
+                if res.status_code == 200:
+                    results = res.json().get("results", [])
+                    web_search_context = "\n\nREAL-TIME WEB SEARCH RESEARCH CONTEXT:\n" + "\n".join(
+                        [f"- [{r.get('title')}]({r.get('url')}): {r.get('content')}" for r in results]
+                    )
+            except Exception as search_err:
+                logger.warning("Tavily web search error: %s", search_err)
+
         prompt = f"""You are conducting deep, thorough research on the following topic. Write an exhaustive, professional research report.
 
 USER'S RESEARCH QUERY:
 "{request.goal}"
 {doc_context}
+{web_search_context}
 
 ABSOLUTE RULES:
 1. Your ENTIRE report must be 100% about "{request.goal}" — every paragraph, every example, every data point.
