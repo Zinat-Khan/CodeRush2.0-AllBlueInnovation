@@ -279,17 +279,17 @@ class ModelRouter:
 
             from langchain_openai import ChatOpenAI
 
-            # Map OpenRouter keys to respective models
+            # Map OpenRouter keys to FREE models (paid models return 402)
             model_map = {
-                "openrouter_1": "anthropic/claude-3-haiku",
-                "openrouter_2": "openai/gpt-4o-mini",
-                "openrouter_3": "openai/gpt-4o-mini",
-                "openrouter_4": "anthropic/claude-3-haiku",
-                "openrouter_5": "openai/gpt-4o-mini",
-                "openrouter_6": "openai/gpt-4o-mini",
-                "openrouter_7": "openai/gpt-4o-mini",
+                "openrouter_1": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_2": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_3": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_4": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_5": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_6": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_7": "meta-llama/llama-3.3-70b-instruct:free",
             }
-            model_name = model_map.get(provider_name, "openai/gpt-4o-mini")
+            model_name = model_map.get(provider_name, "meta-llama/llama-3.3-70b-instruct:free")
 
             return ChatOpenAI(
                 model=model_name,

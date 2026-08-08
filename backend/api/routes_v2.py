@@ -764,6 +764,34 @@ async def generate_llm_report(request: ReportGenerateRequest):
             except Exception as search_err:
                 logger.warning("Tavily web search error: %s", search_err)
 
+        # Secondary: Serper.dev Google Search for additional context
+        try:
+            serper_key = getattr(app_settings, 'serper_api_key', '') or '' if 'app_settings' in dir() else os.environ.get('SERPER_API_KEY', '')
+        except Exception:
+            import os
+            serper_key = os.environ.get('SERPER_API_KEY', '')
+
+        if serper_key and len(web_search_context) < 200:
+            try:
+                import requests as http_requests
+                res = http_requests.post(
+                    "https://google.serper.dev/search",
+                    headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+                    json={"q": request.goal, "num": 5},
+                    timeout=8,
+                )
+                if res.status_code == 200:
+                    organic = res.json().get("organic", [])
+                    serper_context = "\n".join(
+                        [f"- [{r.get('title')}]({r.get('link')}): {r.get('snippet', '')}" for r in organic[:5]]
+                    )
+                    if serper_context:
+                        web_search_context += "\n\nADDITIONAL WEB RESEARCH (Google Search):\n" + serper_context
+                        logger.info("Serper web search returned %d results", len(organic[:5]))
+            except Exception as serper_err:
+                logger.warning("Serper web search error: %s", serper_err)
+
+
         prompt = f"""You are conducting deep, thorough research on the following topic. Write an exhaustive, professional research report.
 
 USER'S RESEARCH QUERY:
@@ -819,16 +847,21 @@ Summarize key takeaways with a numbered list of 5-8 specific, actionable recomme
 """
 
         try:
-            llm_router = ModelRouter()
-            report_markdown, meta = await llm_router.ainvoke_text(
-                prompt=prompt,
-                system_prompt=(
-                    "You are a world-class research analyst and domain expert. You conduct deep, thorough research and write "
-                    "authoritative, fact-rich, detailed reports on ANY topic — from zoology, medicine, and science to history, "
-                    "technology, business, and culture. Your reports are comprehensive (1500+ words), include real data, statistics, "
-                    "concrete examples, and are written at a professional/academic level. You NEVER use generic filler — every "
-                    "sentence provides real value and specific information."
-                ),
+            llm_router = ModelRouter(timeout_seconds=90)
+            report_markdown, meta = await llm_router.ainvoke(
+                messages=[
+                    __import__('langchain_core.messages', fromlist=['SystemMessage']).SystemMessage(
+                        content=(
+                            "You are a world-class research analyst and domain expert. You conduct deep, thorough research and write "
+                            "authoritative, fact-rich, detailed reports on ANY topic — from zoology, medicine, and science to history, "
+                            "technology, business, and culture. Your reports are comprehensive (1500+ words), include real data, statistics, "
+                            "concrete examples, and are written at a professional/academic level. You NEVER use generic filler — every "
+                            "sentence provides real value and specific information."
+                        )
+                    ),
+                    __import__('langchain_core.messages', fromlist=['HumanMessage']).HumanMessage(content=prompt),
+                ],
+                max_tokens=4096,
             )
 
             return {
