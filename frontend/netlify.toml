@@ -1,6 +1,5 @@
 [build]
-  base = "frontend"
-  publish = "frontend/.next"
+  publish = ".next"
   command = "npm run build"
 
 [build.environment]
@@ -10,13 +9,11 @@
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
-# Proxy frontend API requests to backend
 [[redirects]]
   from = "/api/v2/*"
   to = "http://127.0.0.1:8000/api/v2/:splat"
   status = 200
 
-# Next.js route fallback
 [[redirects]]
   from = "/*"
   to = "/index.html"
