@@ -184,9 +184,9 @@ class ModelRouter:
         settings = self._settings
         primary = settings.primary_provider
 
-        # Main APIs + OpenRouter Fallbacks + Local
+        # Main APIs: OpenAI -> Google -> Groq -> OpenRouter Fallbacks -> Local
         all_providers = [
-            "google", "openai", "groq",
+            "openai", "google", "groq",
             "openrouter_1", "openrouter_2", "openrouter_3",
             "openrouter_4", "openrouter_5", "openrouter_6", "openrouter_7",
             "ollama",

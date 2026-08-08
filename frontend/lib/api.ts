@@ -189,6 +189,51 @@ export async function getEvents(runId: string): Promise<{
   return apiFetch(`/observability/events/${runId}`);
 }
 
+/** POST /api/v2/documents/upload — Ingest document into vector store. */
+export async function uploadDocument(filename: string, content: string, workspaceId: string = "default_workspace"): Promise<{
+  status: string;
+  doc_id?: string;
+  filename: string;
+  chunks_indexed?: number;
+  message?: string;
+}> {
+  return apiFetch("/documents/upload", {
+    method: "POST",
+    body: JSON.stringify({ filename, content, workspace_id: workspaceId }),
+  });
+}
+
+/** POST /api/v2/rag/ask — Ask question against uploaded vector documents. */
+export async function askRAGQuestion(query: string, workspaceId: string = "default_workspace", topK: number = 5): Promise<{
+
+  query: string;
+  answer: string;
+  sources: Array<{ content: string; score: number; source: string; chunk_index: number }>;
+  count: number;
+}> {
+  return apiFetch("/rag/ask", {
+    method: "POST",
+    body: JSON.stringify({ query, workspace_id: workspaceId, top_k: topK }),
+  });
+}
+
+/** POST /api/v2/report/generate — Direct LLM synthesis of deep research report. */
+export async function generateLLMReportApi(goal: string, uploadedDocs: string[] = [], qaHistory: any[] = []): Promise<{
+  status: string;
+  goal: string;
+  report_content: string;
+  provider: string;
+  model: string;
+  tokens: number;
+}> {
+  return apiFetch("/report/generate", {
+    method: "POST",
+    body: JSON.stringify({ goal, uploaded_docs: uploadedDocs, qa_history: qaHistory }),
+  });
+}
+
+
+
 /* -- SSE Stream -------------------------------------------------------- */
 
 export type SSEEventCallback = (event: SSEEvent) => void;

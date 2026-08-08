@@ -641,10 +641,11 @@ code {
 }
 
 .app-view-slider {
-  display: flex;
-  width: 400vw;
+  display: block;
+  width: 100vw;
   height: 100vh;
-  transition: transform 450ms cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+  position: relative;
 }
 
 
