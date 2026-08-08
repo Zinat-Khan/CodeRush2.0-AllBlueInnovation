@@ -21,6 +21,13 @@ short_description: Multi-agent orchestration engine with DAG execution
 - **Track**: Agentic Ecosystem
 - **Challenge / Problem Statement**: Create a single app that lets users configure a commercial or local LLM, describe a goal, generate a typed network of specialized agents, and execute that network sequentially or in parallel with visible state, budgets, permissions, and verification.
 
+### 🌐 Live Demo & Production Links
+[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces%20Live-FFD21E?style=for-the-badge&logo=huggingface)](https://huggingface.co/spaces/uzaif1/AE-03-Unified-Agentic-AI-Orchestrator)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github)](https://github.com/Zinat-Khan/CodeRush2.0-AllBlueInnovation)
+
+- **Hugging Face Live Space**: [https://huggingface.co/spaces/uzaif1/AE-03-Unified-Agentic-AI-Orchestrator](https://huggingface.co/spaces/uzaif1/AE-03-Unified-Agentic-AI-Orchestrator)
+- **GitHub Repository**: [https://github.com/Zinat-Khan/CodeRush2.0-AllBlueInnovation](https://github.com/Zinat-Khan/CodeRush2.0-AllBlueInnovation)
+
 ### 🛡️ Tech Stack Badges
 ![Next.js](https://img.shields.io/badge/Next.js-16.3-black?style=for-the-badge&logo=nextdotjs)
 ![React](https://img.shields.io/badge/React-19.0-61DAFB?style=for-the-badge&logo=react)
