@@ -102,6 +102,20 @@ class AppSettings(BaseSettings):
         description="OpenRouter Key 7 (ChatGPT).",
     )
 
+    # ── Real-Time Web Research & Domain Data APIs ─────────────────────
+    tavily_api_key: str = Field(
+        default="",
+        description="Tavily Search API key.",
+    )
+    serper_api_key: str = Field(
+        default="",
+        description="Serper.dev Google Search API key.",
+    )
+    alpha_vantage_api_key: str = Field(
+        default="",
+        description="Alpha Vantage Financial Data API key.",
+    )
+
 
     # ── Ollama (Local Fallback) ───────────────────────────────────────
     ollama_base_url: str = Field(
