@@ -740,19 +740,27 @@ async def generate_llm_report(request: ReportGenerateRequest):
 
         # Fetch real-time web research via Tavily API if configured
         web_search_context = ""
-        if settings.tavily_api_key:
+        try:
+            app_settings = get_settings()
+            tavily_key = getattr(app_settings, 'tavily_api_key', '') or ''
+        except Exception:
+            import os
+            tavily_key = os.environ.get('TAVILY_API_KEY', '')
+
+        if tavily_key:
             try:
-                import requests
-                res = requests.post(
+                import requests as http_requests
+                res = http_requests.post(
                     "https://api.tavily.com/search",
-                    json={"api_key": settings.tavily_api_key, "query": request.goal, "max_results": 5},
-                    timeout=5,
+                    json={"api_key": tavily_key, "query": request.goal, "max_results": 5},
+                    timeout=8,
                 )
                 if res.status_code == 200:
                     results = res.json().get("results", [])
-                    web_search_context = "\n\nREAL-TIME WEB SEARCH RESEARCH CONTEXT:\n" + "\n".join(
+                    web_search_context = "\n\nREAL-TIME WEB SEARCH RESEARCH CONTEXT (use these facts in your report):\n" + "\n".join(
                         [f"- [{r.get('title')}]({r.get('url')}): {r.get('content')}" for r in results]
                     )
+                    logger.info("Tavily web search returned %d results for: %s", len(results), request.goal[:60])
             except Exception as search_err:
                 logger.warning("Tavily web search error: %s", search_err)
 

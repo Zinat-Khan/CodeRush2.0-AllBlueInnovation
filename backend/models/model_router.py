@@ -162,7 +162,7 @@ class ModelRouter:
         self,
         settings: Optional[AppSettings] = None,
         max_retries: int = 0,
-        timeout_seconds: int = 15,
+        timeout_seconds: int = 60,
     ):
 
         self._settings = settings or get_settings()

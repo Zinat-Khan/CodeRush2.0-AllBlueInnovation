@@ -108,6 +108,8 @@ def create_app() -> FastAPI:
                 "version": "0.1.0",
                 "timestamp": time.time(),
             }
+        )
+
     # ── Static Frontend Export Mounting (for Hugging Face Spaces & Docker) ──
     import os
     from fastapi.staticfiles import StaticFiles
