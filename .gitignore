@@ -33,6 +33,8 @@ desktop.ini
 node_modules/
 .next/
 out/
+# Compiled static chunks (contain embedded API keys, pushed to HF only)
+_next/
 
 # Pytest
 .pytest_cache/

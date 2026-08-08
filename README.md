@@ -3,8 +3,7 @@ title: AE-03 Unified Agentic AI Orchestrator
 emoji: 🚀
 colorFrom: indigo
 colorTo: purple
-sdk: docker
-app_port: 7860
+sdk: static
 pinned: false
 license: mit
 short_description: Multi-agent orchestration engine with DAG execution

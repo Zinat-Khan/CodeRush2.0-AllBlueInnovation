@@ -466,10 +466,7 @@ ${docSection}${qaSection}
     const content = getReportContent();
     if (!content) return;
 
-    const printWindow = window.open("", "_blank");
-    if (!printWindow) return;
-
-    // Convert Markdown tables, headings, callouts & lists to styled HTML
+    // Convert Markdown to styled HTML
     let formattedHtml = content
       .replace(/^### (.*$)/gim, '<h3 class="pdf-h3">$1</h3>')
       .replace(/^## (.*$)/gim, '<h2 class="pdf-h2">$1</h2>')
@@ -479,14 +476,12 @@ ${docSection}${qaSection}
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code class="pdf-code">$1</code>');
 
-    // Convert markdown tables | header | header | into HTML <table>
-    formattedHtml = formattedHtml.replace(/\|(.+)\|[\r\n]+\|[-:| ]+\|[\r\n]+((?:\|.+\|[\r\n]*)+)/g, (match, headerRow, bodyRows) => {
+    // Convert markdown tables
+    formattedHtml = formattedHtml.replace(/\|(.+)\|[\r\n]+\|[-:| ]+\|[\r\n]+((?:\|.+\|[\r\n]*)+)/g, (match: string, headerRow: string, bodyRows: string) => {
       const headers = headerRow.split('|').filter((cell: string) => cell.trim().length > 0);
       const rows = bodyRows.trim().split('\n').map((row: string) => row.split('|').filter((cell: string) => cell.trim().length > 0));
-
       const ths = headers.map((h: string) => `<th>${h.trim()}</th>`).join('');
       const trs = rows.map((r: string[]) => `<tr>${r.map((c: string) => `<td>${c.trim()}</td>`).join('')}</tr>`).join('');
-
       return `<div class="table-container"><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
     });
 
@@ -495,289 +490,131 @@ ${docSection}${qaSection}
     const reportId = `RPT-${Date.now().toString(36).toUpperCase()}`;
     const generatedAt = new Date().toLocaleString();
 
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>AE-03 Research Report - ${goalText.slice(0, 40) || "Executive Deliverable"}</title>
-          <style>
-            @media print {
-              body { margin: 0; padding: 15px; font-size: 11pt; }
-              .no-print { display: none !important; }
-              .page-break { page-break-before: always; }
-            }
-            body {
-              font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-              color: #0f172a;
-              max-width: 900px;
-              margin: 0 auto;
-              padding: 40px 30px;
-              line-height: 1.65;
-              background: #ffffff;
-            }
-            .no-print-bar {
-              background: #0b0e14;
-              color: #ffffff;
-              padding: 12px 24px;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin: -40px -30px 30px -30px;
-              border-radius: 0 0 10px 10px;
-              box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            }
-            .print-btn {
-              background: linear-gradient(135deg, #2563eb, #1d4ed8);
-              color: #ffffff;
-              border: none;
-              padding: 8px 18px;
-              border-radius: 6px;
-              font-size: 13px;
-              font-weight: 600;
-              cursor: pointer;
-              box-shadow: 0 2px 8px rgba(37,99,235,0.3);
-            }
-            .print-btn:hover { background: #1d4ed8; }
+    const fullHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>AE-03 Research Report - ${goalText.slice(0, 40) || "Executive Deliverable"}</title>
+  <style>
+    @media print {
+      body { margin: 0; padding: 15px; font-size: 11pt; }
+      .no-print { display: none !important; }
+      .page-break { page-break-before: always; }
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: #0f172a; max-width: 900px; margin: 0 auto; padding: 40px 30px; line-height: 1.65; background: #ffffff;
+    }
+    .no-print-bar {
+      background: #0b0e14; color: #ffffff; padding: 12px 24px; display: flex; justify-content: space-between;
+      align-items: center; margin: -40px -30px 30px -30px; border-radius: 0 0 10px 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .print-btn {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #ffffff; border: none; padding: 8px 18px;
+      border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(37,99,235,0.3);
+    }
+    .print-btn:hover { background: #1d4ed8; }
+    .doc-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 20px; margin-bottom: 24px; }
+    .top-meta-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .org-title { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: #2563eb; text-transform: uppercase; }
+    .doc-id { font-family: monospace; font-size: 11px; color: #64748b; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
+    .main-title { font-size: 26px; font-weight: 800; color: #0f172a; margin: 0 0 6px 0; letter-spacing: -0.02em; }
+    .goal-banner { font-size: 14px; color: #334155; background: #f8fafc; border-left: 4px solid #2563eb; padding: 10px 14px; border-radius: 0 6px 6px 0; margin-top: 10px; font-weight: 500; }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; background: #f8fafc; padding: 14px; border-radius: 8px; border: 1px solid #e2e8f0; }
+    .metric-box { text-align: center; }
+    .metric-box-label { font-size: 10px; text-transform: uppercase; color: #64748b; font-weight: 600; }
+    .metric-box-value { font-size: 16px; font-weight: 700; color: #0f172a; font-family: monospace; margin-top: 2px; }
+    .workflow-card { background: #0f172a; color: #fff; padding: 16px 20px; border-radius: 10px; margin: 24px 0; }
+    .workflow-title { font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #38bdf8; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .pdf-h1 { font-size: 20px; font-weight: 700; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; margin-top: 28px; margin-bottom: 12px; }
+    .pdf-h2 { font-size: 16px; font-weight: 700; color: #1e293b; margin-top: 22px; margin-bottom: 10px; }
+    .pdf-h3 { font-size: 14px; font-weight: 600; color: #334155; margin-top: 16px; margin-bottom: 8px; }
+    .pdf-li { margin-left: 22px; margin-bottom: 6px; color: #1e293b; }
+    .pdf-code { font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #2563eb; }
+    .table-container { margin: 18px 0; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
+    th { background: #f1f5f9; font-weight: 700; color: #0f172a; }
+    tr:nth-child(even) { background: #f8fafc; }
+    .doc-footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="no-print-bar no-print">
+    <span style="font-weight:600;font-size:14px;">📄 Executive PDF Schema — Point-to-Point Verified Report</span>
+    <button onclick="window.print()" class="print-btn">🖨️ Save / Export as PDF</button>
+  </div>
 
-            /* Executive Header Banner */
-            .doc-header {
-              border-bottom: 2px solid #e2e8f0;
-              padding-bottom: 20px;
-              margin-bottom: 24px;
-            }
-            .top-meta-row {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin-bottom: 12px;
-            }
-            .org-title {
-              font-size: 11px;
-              font-weight: 700;
-              letter-spacing: 0.1em;
-              color: #2563eb;
-              text-transform: uppercase;
-            }
-            .doc-id {
-              font-family: monospace;
-              font-size: 11px;
-              color: #64748b;
-              background: #f1f5f9;
-              padding: 2px 8px;
-              border-radius: 4px;
-            }
-            .main-title {
-              font-size: 26px;
-              font-weight: 800;
-              color: #0f172a;
-              margin: 0 0 6px 0;
-              letter-spacing: -0.02em;
-            }
-            .goal-banner {
-              font-size: 14px;
-              color: #334155;
-              background: #f8fafc;
-              border-left: 4px solid #2563eb;
-              padding: 10px 14px;
-              border-radius: 0 6px 6px 0;
-              margin-top: 10px;
-              font-weight: 500;
-            }
+  <div class="doc-header">
+    <div class="top-meta-row">
+      <span class="org-title">AE-03 DIRECTIVE V2 MULTI-AGENT PLATFORM</span>
+      <span class="doc-id">${reportId}</span>
+    </div>
+    <h1 class="main-title">Executive Research Deliverable</h1>
+    <div class="goal-banner">
+      <strong>Goal:</strong> ${goalText || "Multi-Agent Research Goal"}
+    </div>
+  </div>
 
-            /* Metrics & Metadata Grid */
-            .metrics-grid {
-              display: grid;
-              grid-template-columns: repeat(4, 1fr);
-              gap: 12px;
-              margin: 20px 0;
-              background: #f8fafc;
-              padding: 14px;
-              border-radius: 8px;
-              border: 1px solid #e2e8f0;
-            }
-            .metric-box { text-align: center; }
-            .metric-box-label { font-size: 10px; text-transform: uppercase; color: #64748b; font-weight: 600; }
-            .metric-box-value { font-size: 16px; font-weight: 700; color: #0f172a; font-family: monospace; margin-top: 2px; }
+  <div class="metrics-grid">
+    <div class="metric-box"><div class="metric-box-label">Pipeline</div><div class="metric-box-value" style="font-size:13px;color:#2563eb;">LangGraph DAG</div></div>
+    <div class="metric-box"><div class="metric-box-label">Agents Active</div><div class="metric-box-value">8 Roles</div></div>
+    <div class="metric-box"><div class="metric-box-label">Tokens Processed</div><div class="metric-box-value">${metrics.totalTokens || 5528}</div></div>
+    <div class="metric-box"><div class="metric-box-label">Verification</div><div class="metric-box-value" style="color:#16a34a;">PASSED ✓</div></div>
+  </div>
 
-            /* Workflow SVG Diagram Card */
-            .workflow-card {
-              background: #0f172a;
-              color: #fff;
-              padding: 16px 20px;
-              border-radius: 10px;
-              margin: 24px 0;
-            }
-            .workflow-title {
-              font-size: 12px;
-              font-weight: 700;
-              letter-spacing: 0.05em;
-              text-transform: uppercase;
-              color: #38bdf8;
-              margin-bottom: 12px;
-              display: flex;
-              align-items: center;
-              gap: 8px;
-            }
+  <div class="workflow-card">
+    <div class="workflow-title">⚡ Multi-Agent LangGraph Orchestration Topology</div>
+    <svg viewBox="0 0 800 90" width="100%" height="70" xmlns="http://www.w3.org/2000/svg">
+      <rect x="10" y="25" width="90" height="35" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+      <text x="55" y="47" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Planner</text>
+      <line x1="100" y1="42" x2="130" y2="42" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3"/>
+      <rect x="130" y="25" width="100" height="35" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+      <text x="180" y="47" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Task Router</text>
+      <line x1="230" y1="42" x2="260" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="260" y="10" width="110" height="30" rx="5" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
+      <text x="315" y="30" fill="#4ade80" font-size="10" text-anchor="middle">Researcher</text>
+      <rect x="260" y="50" width="110" height="30" rx="5" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
+      <text x="315" y="70" fill="#4ade80" font-size="10" text-anchor="middle">Tool Executor</text>
+      <line x1="370" y1="25" x2="400" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
+      <line x1="370" y1="65" x2="400" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="400" y="25" width="90" height="35" rx="6" fill="#1e293b" stroke="#eab308" stroke-width="1.5"/>
+      <text x="445" y="47" fill="#fef08a" font-size="11" font-weight="600" text-anchor="middle">Critic</text>
+      <line x1="490" y1="42" x2="520" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="520" y="25" width="100" height="35" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="1.5"/>
+      <text x="570" y="47" fill="#e9d5ff" font-size="11" font-weight="600" text-anchor="middle">Verifier (HITL)</text>
+      <line x1="620" y1="42" x2="650" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="650" y="25" width="100" height="35" rx="6" fill="#16a34a" stroke="#4ade80" stroke-width="1.5"/>
+      <text x="700" y="47" fill="#fff" font-size="11" font-weight="700" text-anchor="middle">Reporter</text>
+    </svg>
+  </div>
 
-            /* Document Content Formatting */
-            .pdf-h1 {
-              font-size: 20px;
-              font-weight: 700;
-              color: #0f172a;
-              border-bottom: 2px solid #e2e8f0;
-              padding-bottom: 6px;
-              margin-top: 28px;
-              margin-bottom: 12px;
-            }
-            .pdf-h2 {
-              font-size: 16px;
-              font-weight: 700;
-              color: #1e293b;
-              margin-top: 22px;
-              margin-bottom: 10px;
-              display: flex;
-              align-items: center;
-              gap: 6px;
-            }
-            .pdf-h3 {
-              font-size: 14px;
-              font-weight: 600;
-              color: #334155;
-              margin-top: 16px;
-              margin-bottom: 8px;
-            }
-            .pdf-li {
-              margin-left: 22px;
-              margin-bottom: 6px;
-              color: #1e293b;
-            }
-            .pdf-code {
-              font-family: monospace;
-              background: #f1f5f9;
-              padding: 2px 6px;
-              border-radius: 4px;
-              font-size: 12px;
-              color: #2563eb;
-            }
-            .table-container {
-              margin: 18px 0;
-              overflow-x: auto;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              font-size: 12px;
-            }
-            th, td {
-              border: 1px solid #cbd5e1;
-              padding: 8px 12px;
-              text-align: left;
-            }
-            th {
-              background: #f1f5f9;
-              font-weight: 700;
-              color: #0f172a;
-            }
-            tr:nth-child(even) { background: #f8fafc; }
+  <div class="report-content">${formattedHtml}</div>
 
-            /* Footer */
-            .doc-footer {
-              margin-top: 40px;
-              padding-top: 14px;
-              border-top: 1px solid #e2e8f0;
-              display: flex;
-              justify-content: space-between;
-              font-size: 11px;
-              color: #94a3b8;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="no-print-bar no-print">
-            <span style="font-weight:600;font-size:14px;">📄 Executive PDF Schema — Point-to-Point Verified Report</span>
-            <button onclick="window.print()" class="print-btn">🖨️ Save / Export as PDF</button>
-          </div>
+  <div class="doc-footer">
+    <span>Generated by AE-03 Orchestrator Platform</span>
+    <span>Date: ${generatedAt}</span>
+    <span>Security Policy: 6-Chain Guardrail Verified</span>
+  </div>
+</body>
+</html>`;
 
-          <div class="doc-header">
-            <div class="top-meta-row">
-              <span class="org-title">AE-03 DIRECTIVE V2 MULTI-AGENT PLATFORM</span>
-              <span class="doc-id">${reportId}</span>
-            </div>
-            <h1 class="main-title">Executive Research Deliverable</h1>
-            <div class="goal-banner">
-              <strong>Goal:</strong> ${goalText || "Multi-Agent Research Goal"}
-            </div>
-          </div>
+    // Method: Download as HTML file that user can open and print to PDF
+    const blob = new Blob([fullHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
 
-          <div class="metrics-grid">
-            <div class="metric-box">
-              <div class="metric-box-label">Pipeline</div>
-              <div class="metric-box-value" style="font-size:13px;color:#2563eb;">LangGraph DAG</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-box-label">Agents Active</div>
-              <div class="metric-box-value">8 Roles</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-box-label">Tokens Processed</div>
-              <div class="metric-box-value">${metrics.totalTokens || 5528}</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-box-label">Verification</div>
-              <div class="metric-box-value" style="color:#16a34a;">PASSED ✓</div>
-            </div>
-          </div>
-
-          <div class="workflow-card">
-            <div class="workflow-title">⚡ Multi-Agent LangGraph Orchestration Topology</div>
-            <svg viewBox="0 0 800 90" width="100%" height="70" xmlns="http://www.w3.org/2000/svg">
-              <rect x="10" y="25" width="90" height="35" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
-              <text x="55" y="47" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Planner</text>
-
-              <line x1="100" y1="42" x2="130" y2="42" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3"/>
-
-              <rect x="130" y="25" width="100" height="35" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
-              <text x="180" y="47" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Task Router</text>
-
-              <line x1="230" y1="42" x2="260" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
-
-              <rect x="260" y="10" width="110" height="30" rx="5" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
-              <text x="315" y="30" fill="#4ade80" font-size="10" text-anchor="middle">Researcher</text>
-
-              <rect x="260" y="50" width="110" height="30" rx="5" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
-              <text x="315" y="70" fill="#4ade80" font-size="10" text-anchor="middle">Tool Executor</text>
-
-              <line x1="370" y1="25" x2="400" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
-              <line x1="370" y1="65" x2="400" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
-
-              <rect x="400" y="25" width="90" height="35" rx="6" fill="#1e293b" stroke="#eab308" stroke-width="1.5"/>
-              <text x="445" y="47" fill="#fef08a" font-size="11" font-weight="600" text-anchor="middle">Critic</text>
-
-              <line x1="490" y1="42" x2="520" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
-
-              <rect x="520" y="25" width="100" height="35" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="1.5"/>
-              <text x="570" y="47" fill="#e9d5ff" font-size="11" font-weight="600" text-anchor="middle">Verifier (HITL)</text>
-
-              <line x1="620" y1="42" x2="650" y2="42" stroke="#38bdf8" stroke-width="1.5"/>
-
-              <rect x="650" y="25" width="100" height="35" rx="6" fill="#16a34a" stroke="#4ade80" stroke-width="1.5"/>
-              <text x="700" y="47" fill="#fff" font-size="11" font-weight="700" text-anchor="middle">Reporter</text>
-            </svg>
-          </div>
-
-          <div class="report-content">
-            ${formattedHtml}
-          </div>
-
-          <div class="doc-footer">
-            <span>Generated by AE-03 Orchestrator Platform</span>
-            <span>Date: ${generatedAt}</span>
-            <span>Security Policy: 6-Chain Guardrail Verified</span>
-          </div>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
+    // Try opening in new tab first
+    const newWin = window.open(url, "_blank");
+    if (!newWin) {
+      // Popup blocked (e.g. inside iframe on HF) — fallback to download
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `AE03_Research_Report_${Date.now()}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+    // Cleanup after a delay
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
 
 
