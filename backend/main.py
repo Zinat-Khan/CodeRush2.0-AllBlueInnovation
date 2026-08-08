@@ -108,7 +108,13 @@ def create_app() -> FastAPI:
                 "version": "0.1.0",
                 "timestamp": time.time(),
             }
-        )
+    # ── Static Frontend Export Mounting (for Hugging Face Spaces & Docker) ──
+    import os
+    from fastapi.staticfiles import StaticFiles
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "out")
+    if os.path.exists(out_dir):
+        logger.info("Mounting frontend static export from %s", out_dir)
+        application.mount("/", StaticFiles(directory=out_dir, html=True), name="static")
 
     return application
 

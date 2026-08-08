@@ -1,26 +1,31 @@
-# Production Dockerfile for AE-03 Directive V2 FastAPI Backend
-FROM python:3.11-slim
+# ── Stage 1: Build Next.js Frontend Static Export ──
+FROM node:20-slim AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
+# ── Stage 2: Python FastAPI Application Server ──
+FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies required for PostgreSQL and builds
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
+# Python dependencies
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
-COPY backend/ ./backend/
-COPY additionals/ ./additionals/
+# Copy backend codebase and static frontend assets
+COPY . .
+COPY --from=frontend-builder /app/frontend/out ./frontend/out
 
-EXPOSE 8000
+# Hugging Face Spaces uses port 7860
+EXPOSE 7860
 
-ENV PORT=8000
-ENV ENVIRONMENT=production
-
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Launch unified server
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7860"]
